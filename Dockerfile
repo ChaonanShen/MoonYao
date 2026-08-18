@@ -19,6 +19,11 @@ RUN apt-get update \
 
 ENV PATH="/root/.moon/bin:${PATH}"
 
+# Registry metadata lives under the container user's Moon cache.  Preload it
+# into the toolchain image so each short-lived `docker run` can resolve the
+# dependencies already declared by the bind-mounted workspace.
+RUN moon update
+
 WORKDIR /workspace
 
 ENTRYPOINT ["moon"]

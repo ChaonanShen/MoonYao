@@ -1,0 +1,2 @@
+// Structured errors are intentionally dependency-free so every runtime layer
+// can report a stable public diagnostic without importing an adapter.

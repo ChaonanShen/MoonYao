@@ -209,8 +209,10 @@ fn parse_stream_json(
         match choice_object.get("delta") {
           Some(Object(delta)) =>
             match delta.get("content") {
-              Some(String(text)) if text.length() > 0 =>
-                events.push(TextDelta(text))
+              Some(String(text)) =>
+                if text.length() > 0 {
+                  events.push(TextDelta(text))
+                }
               None | Some(Null) => ()
               _ =>
                 return Err(

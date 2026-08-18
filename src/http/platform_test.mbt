@@ -233,6 +233,11 @@ test "embedded CUI uses safe DOM rendering and no external build chain" {
   assert_true(agent_css.contains("@media"))
   assert_true(agent_js.contains("textContent"))
   assert_false(agent_js.contains("innerHTML"))
+  assert_true(
+    agent_js.contains(
+      "catch(error){await openChat(state.chatId).catch(()=>{});showError(error)}",
+    ),
+  )
   assert_false(agent_html.contains("https://"))
   assert_false(agent_js.contains("https://"))
 }

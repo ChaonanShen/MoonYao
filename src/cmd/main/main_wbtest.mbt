@@ -40,7 +40,7 @@ test "check is side-effect free while migrate and run use the configured databas
 
 ///|
 test "CLI rejects invalid JSON and unsupported command shapes" {
-  match execute(["run", "example/todo", "models.todo.List", "{"]) {
+  match execute(["run", "testdata/apps/cli-sandbox", "models.todo.List", "{"]) {
     Err(error) => assert_eq(error.code, @errors.InvalidArgument)
     Ok(_) => abort("expected invalid JSON")
   }
@@ -72,6 +72,19 @@ async test "platform responses cross real TCP with security headers" {
     let server = @asynchttp.Server(@socket.Addr::parse("127.0.0.1:0"))
     group.spawn_bg(no_wait=true) <| () => {
       server.run_forever(allow_failure=true) <| ((request, _, connection) => {
+        if request.path == "/unicode" {
+          send_platform_response(
+            connection,
+            {
+              status: 200,
+              content_type: "text/plain; charset=utf-8",
+              body: "你好",
+              location: "",
+            },
+            "request-id",
+          )
+          return
+        }
         let database = @sqlite3.Connection::open(":memory:")
         ignore(@conversation.migrate(database))
         let action = @moonhttp.dispatch_platform(
@@ -118,6 +131,10 @@ async test "platform responses cross real TCP with security headers" {
       page.headers.get("content-type").unwrap().has_prefix("text/html"),
     )
     assert_true(page_body.text().contains("MoonYao Agent"))
+    let (unicode, unicode_body) = @asynchttp.get(base + "/unicode")
+    assert_eq(unicode.code, 200)
+    assert_eq(unicode.headers.get("content-length"), Some("6"))
+    assert_eq(unicode_body.text(), "你好")
     server.close()
   }
 }

@@ -413,13 +413,32 @@ fn platform_headers(
 }
 
 ///|
+fn utf8_length(value : String) -> Int {
+  let mut bytes = 0
+  for character in value {
+    let code = character.to_int()
+    bytes = bytes +
+      (if code <= 0x7f {
+        1
+      } else if code <= 0x7ff {
+        2
+      } else if code <= 0xffff {
+        3
+      } else {
+        4
+      })
+  }
+  bytes
+}
+
+///|
 async fn send_platform_response(
   connection : @asynchttp.ServerConnection,
   response : @moonhttp.PlatformResponse,
   id : String,
 ) -> Unit {
   let headers = platform_headers(response.content_type, id)
-  headers.set("Content-Length", response.body.length().to_string())
+  headers.set("Content-Length", utf8_length(response.body).to_string())
   if response.location.length() > 0 {
     headers.set("Location", response.location)
   }
@@ -446,7 +465,7 @@ async fn send_platform_error(
 ) -> Unit {
   let body = error.to_json().stringify()
   let headers = platform_headers("application/json; charset=utf-8", id)
-  headers.set("Content-Length", body.length().to_string())
+  headers.set("Content-Length", utf8_length(body).to_string())
   if error.code == @errors.MethodNotAllowed {
     headers.set("Allow", error.path)
   }
@@ -817,7 +836,7 @@ async fn serve_command(app_dir : String) -> Unit {
           let response = error.to_json().stringify()
           let response_headers = {
             "Content-Type": "application/json; charset=utf-8",
-            "Content-Length": response.length().to_string(),
+            "Content-Length": utf8_length(response).to_string(),
             "X-Request-Id": id,
           }
           if error.code == @errors.MethodNotAllowed {
@@ -869,7 +888,7 @@ async fn serve_command(app_dir : String) -> Unit {
             let response = output.stringify()
             connection.send_response(200, "OK", extra_headers={
               "Content-Type": "application/json; charset=utf-8",
-              "Content-Length": response.length().to_string(),
+              "Content-Length": utf8_length(response).to_string(),
               "X-Request-Id": id,
             })
             connection.write_string(response)
@@ -879,7 +898,7 @@ async fn serve_command(app_dir : String) -> Unit {
             let response = error.to_json().stringify()
             let response_headers = {
               "Content-Type": "application/json; charset=utf-8",
-              "Content-Length": response.length().to_string(),
+              "Content-Length": utf8_length(response).to_string(),
               "X-Request-Id": id,
             }
             if error.code == @errors.MethodNotAllowed {

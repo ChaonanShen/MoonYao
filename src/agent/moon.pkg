@@ -1,0 +1,12 @@
+import {
+  "ChaonanShen/MoonYao/errors",
+  "ChaonanShen/MoonYao/conversation",
+  "ChaonanShen/MoonYao/llm",
+  "ChaonanShen/MoonYao/model",
+  "moonbitlang/core/json",
+  "moonbit-community/sqlite3",
+}
+
+import {
+  "moonbitlang/async",
+} for "test"

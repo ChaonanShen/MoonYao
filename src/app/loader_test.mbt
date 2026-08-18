@@ -10,6 +10,19 @@ test "application loader reads a valid application" {
 }
 
 ///|
+test "application loader resolves the example connector, agent, and prompts" {
+  match load("example/todo") {
+    Ok(application) => {
+      assert_eq(application.agents.length(), 1)
+      assert_eq(application.agents[0].id, "todo")
+      assert_eq(application.agents[0].prompts.length(), 1)
+      assert_true(application.connector is Some(_))
+    }
+    Err(error) => fail(error.message + " at " + error.path)
+  }
+}
+
+///|
 test "application loader retains model file diagnostics" {
   match load("testdata/apps/invalid-unknown-type") {
     Err(error) => assert_eq(error.path, "models/todo.json.columns[0].type")

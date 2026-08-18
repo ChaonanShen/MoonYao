@@ -7,6 +7,8 @@ pub(all) struct Application {
   globals : Map[String, Json]
   apis : Array[@http.Api]
   listen : String
+  connector : @llm.Connector?
+  agents : Array[@agent.Agent]
 } derive(Debug)
 
 ///|
@@ -223,7 +225,110 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
       }
     }
   }
-  Ok({ name, database, models, flows, globals, apis, listen })
+  let connector_directory = root + "/connectors"
+  let mut connector : @llm.Connector? = None
+  if @fs.path_exists(connector_directory) {
+    let connector_entries = @fs.read_dir(connector_directory) catch {
+      (_ : @fs.IOError) =>
+        return Err(
+          @errors.invalid_dsl(
+            "could not read connectors directory", "connectors",
+          ),
+        )
+    }
+    connector_entries.sort()
+    for entry in connector_entries {
+      if entry.has_suffix(".json") && entry != "default.json" {
+        return Err(
+          @errors.invalid_dsl(
+            "P5 supports only connectors/default.json",
+            "connectors/" + entry,
+          ),
+        )
+      }
+    }
+    if @fs.path_exists(connector_directory + "/default.json") {
+      let json = match read_json(connector_directory + "/default.json") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      connector = match @llm.parse_connector(json, "connectors/default.json") {
+        Ok(v) => Some(v)
+        Err(e) => return Err(e)
+      }
+    }
+  }
+  let agents : Array[@agent.Agent] = []
+  let agent_directory = root + "/agents"
+  if @fs.path_exists(agent_directory) {
+    let agent_entries = @fs.read_dir(agent_directory) catch {
+      (_ : @fs.IOError) =>
+        return Err(
+          @errors.invalid_dsl("could not read agents directory", "agents"),
+        )
+    }
+    agent_entries.sort()
+    for entry in agent_entries {
+      let agent_path = agent_directory + "/" + entry + "/agent.json"
+      let prompt_path = agent_directory + "/" + entry + "/prompts.json"
+      if @fs.path_exists(agent_path) {
+        let agent_json = match read_json(agent_path) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        let parsed = match
+          @agent.parse_agent(
+            agent_json,
+            entry,
+            "agents/" + entry + "/agent.json",
+          ) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        if agents.any(existing => existing.id == parsed.id) {
+          return Err(
+            @errors.invalid_dsl(
+              "duplicate agent id",
+              "agents/" + entry + "/agent.json.id",
+            ),
+          )
+        }
+        if !@fs.path_exists(prompt_path) {
+          return Err(
+            @errors.invalid_dsl(
+              "missing prompts.json",
+              "agents/" + entry + "/prompts.json",
+            ),
+          )
+        }
+        let prompt_json = match read_json(prompt_path) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        let prompts = match
+          @agent.parse_prompts(prompt_json, "agents/" + entry + "/prompts.json") {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        agents.push({
+          id: parsed.id,
+          name: parsed.name,
+          description: parsed.description,
+          connector: parsed.connector,
+          options: parsed.options,
+          prompts,
+        })
+      }
+    }
+  }
+  if !agents.is_empty() && connector is None {
+    return Err(
+      @errors.invalid_dsl(
+        "agents require connectors/default.json", "connectors/default.json",
+      ),
+    )
+  }
+  Ok({ name, database, models, flows, globals, apis, listen, connector, agents })
 }
 
 ///|

@@ -1,7 +1,7 @@
 ///|
 fn usage_error() -> @errors.EngineError {
   @errors.invalid_argument(
-    "usage: moonyao check <app-dir> | migrate <app-dir> | run <app-dir> <process> <json> | serve <app-dir>",
+    "usage: moonyao check <app-dir> | migrate <app-dir> | run <app-dir> <process> <json> | serve <app-dir> | agent chat <app-dir> <agent-id> <message> [--chat <chat-id>]",
     "$",
   )
 }
@@ -20,7 +20,7 @@ fn check_command(app_dir : String) -> Result[String, @errors.EngineError] {
   match @app.load(app_dir) {
     Ok(application) =>
       Ok(
-        "checked application '\{application.name}' with \{application.models.length()} model(s) and \{application.flows.length()} flow(s)",
+        "checked application '\{application.name}' with \{application.models.length()} model(s), \{application.flows.length()} flow(s), and \{application.agents.length()} agent(s)",
       )
     Err(error) => Err(error)
   }
@@ -46,6 +46,13 @@ fn migrate_command(app_dir : String) -> Result[String, @errors.EngineError] {
       }
     }
   }
+  match @conversation.migrate(connection) {
+    Ok(_) => ()
+    Err(error) => {
+      ignore(@sqlite.close_result(connection))
+      return Err(error)
+    }
+  }
   match @sqlite.close_result(connection) {
     Err(error) => return Err(error)
     Ok(_) => ()
@@ -53,8 +60,162 @@ fn migrate_command(app_dir : String) -> Result[String, @errors.EngineError] {
   let output : Json = {
     "database": path,
     "migrated": application.models.length(),
+    "conversation_schema": 1,
   }
   Ok(output.stringify())
+}
+
+///|
+let id_random : @random.Rand = @random.Rand::new()
+
+///|
+fn write_hex(output : StringBuilder, value : UInt64) -> Unit {
+  let alphabet = "0123456789abcdef"
+  for index = 15; index >= 0; index = index - 1 {
+    let digit = ((value >> (index * 4)) & 15UL).to_int()
+    output.write_char(alphabet.code_unit_at(digit).unsafe_to_char())
+  }
+}
+
+///|
+fn random_id() -> Result[String, @errors.EngineError] {
+  let output = StringBuilder::new()
+  write_hex(output, id_random.uint64())
+  write_hex(output, id_random.uint64())
+  Ok(output.to_string())
+}
+
+///|
+fn completion_event_json(event : @llm.CompletionEvent) -> Json {
+  match event {
+    @llm.Started => { "event": "turn.started" }
+    @llm.TextDelta(content) => { "event": "message.delta", "content": content }
+    @llm.Usage(usage) =>
+      {
+        "event": "usage",
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+      }
+    @llm.Completed => { "event": "message.completed" }
+    @llm.Failed(code) => { "event": "turn.failed", "code": code }
+  }
+}
+
+///|
+async fn agent_chat_command(
+  app_dir : String,
+  agent_id : String,
+  message : String,
+  chat_id : String?,
+) -> Result[Array[String], @errors.EngineError] {
+  let application = match @app.load(app_dir) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let mut selected : @agent.Agent? = None
+  for agent in application.agents {
+    if agent.id == agent_id {
+      selected = Some(agent)
+    }
+  }
+  let agent = match selected {
+    Some(value) => value
+    None => return Err(@errors.invalid_argument("agent was not found", "agent"))
+  }
+  let connector = match application.connector {
+    Some(value) => value
+    None =>
+      return Err(
+        @errors.invalid_dsl(
+          "connector is not configured", "connectors/default.json",
+        ),
+      )
+  }
+  let api_key = match @env.get_env_var(connector.api_key_env) {
+    Some(value) if value.length() > 0 => value
+    _ => return Err(@errors.llm_error("connector API key is not configured"))
+  }
+  let path = database_path(app_dir, application.database)
+  if !@fs.path_exists(path) {
+    return Err(
+      @errors.database_error(
+        "database does not exist; run migrate first", "database",
+      ),
+    )
+  }
+  let connection = match @sqlite.open_result(path) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let now = @env.now().to_int()
+  match @conversation.recover_active(connection, now) {
+    Err(error) => {
+      ignore(@sqlite.close_result(connection))
+      return Err(error)
+    }
+    Ok(_) => ()
+  }
+  let ids : @agent.Ids = {
+    chat_id: match random_id() {
+      Ok(value) => value
+      Err(error) => {
+        ignore(@sqlite.close_result(connection))
+        return Err(error)
+      }
+    },
+    turn_id: match random_id() {
+      Ok(value) => value
+      Err(error) => {
+        ignore(@sqlite.close_result(connection))
+        return Err(error)
+      }
+    },
+    user_message_id: match random_id() {
+      Ok(value) => value
+      Err(error) => {
+        ignore(@sqlite.close_result(connection))
+        return Err(error)
+      }
+    },
+    assistant_message_id: match random_id() {
+      Ok(value) => value
+      Err(error) => {
+        ignore(@sqlite.close_result(connection))
+        return Err(error)
+      }
+    },
+  }
+  let result = @agent.run_turn(
+    connection,
+    agent,
+    connector,
+    @agent.OpenAI(connector, api_key),
+    chat_id,
+    message,
+    ids,
+    now,
+    event => println(completion_event_json(event).stringify()),
+  )
+  let close_result = @sqlite.close_result(connection)
+  match result {
+    Err(error) => Err(error)
+    Ok(turn) =>
+      match close_result {
+        Err(error) => Err(error)
+        Ok(_) => {
+          let lines : Array[String] = []
+          let final_event : Json = {
+            "event": "turn.completed",
+            "chat_id": turn.chat_id,
+            "turn_id": turn.turn_id,
+            "content": turn.content,
+            "history_truncated": turn.history_truncated,
+          }
+          lines.push(final_event.stringify())
+          Ok(lines)
+        }
+      }
+  }
 }
 
 ///|
@@ -248,6 +409,31 @@ fn main {
   if command_args.length() == 2 && command_args[0] == "serve" {
     @async.run_async_main(() => serve_command(command_args[1]))
     return
+  }
+  let chat_args : (String, String, String, String?)? = match command_args {
+    ["agent", "chat", app_dir, agent_id, message] =>
+      Some((app_dir, agent_id, message, None))
+    ["agent", "chat", app_dir, agent_id, message, "--chat", chat_id] =>
+      Some((app_dir, agent_id, message, Some(chat_id)))
+    _ => None
+  }
+  match chat_args {
+    Some((app_dir, agent_id, message, chat_id)) => {
+      @async.run_async_main(() => {
+        match agent_chat_command(app_dir, agent_id, message, chat_id) {
+          Ok(lines) =>
+            for line in lines {
+              println(line)
+            }
+          Err(error) => {
+            println(error.to_json().stringify())
+            @sys.exit(if error.code == @errors.InvalidArgument { 2 } else { 1 })
+          }
+        }
+      })
+      return
+    }
+    None => ()
   }
   match execute(command_args) {
     Ok(output) => println(output)

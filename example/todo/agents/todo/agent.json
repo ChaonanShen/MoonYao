@@ -1,0 +1,10 @@
+{
+  "id": "todo",
+  "name": "Todo Assistant",
+  "description": "A concise assistant for planning Todo work.",
+  "connector": "default",
+  "options": {
+    "temperature": 0.2,
+    "max_tokens": 1024
+  }
+}

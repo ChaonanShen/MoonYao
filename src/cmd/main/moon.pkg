@@ -1,12 +1,16 @@
 import {
   "ChaonanShen/MoonYao/app",
   "ChaonanShen/MoonYao/errors",
+  "ChaonanShen/MoonYao/http" @moonhttp,
   "ChaonanShen/MoonYao/model",
   "ChaonanShen/MoonYao/process",
   "ChaonanShen/MoonYao/sqlite",
   "ChaonanShen/MoonYao" @moonyao,
   "moonbitlang/core/env",
   "moonbitlang/core/json",
+  "moonbitlang/async",
+  "moonbitlang/async/http" @asynchttp,
+  "moonbitlang/async/socket",
   "moonbitlang/x/fs",
   "moonbitlang/x/sys",
 }

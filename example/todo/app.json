@@ -1,1 +1,1 @@
-{"name":"Todo Example","database":"todo.db"}
+{"name":"Todo Example","database":"todo.db","listen":"127.0.0.1:8080"}

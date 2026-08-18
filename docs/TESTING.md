@@ -25,6 +25,9 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- migrate ./example/todo
 ```
 
+HTTP 变更还需启动 `serve ./example/todo`，以真实 TCP 请求覆盖 Todo 的 Create/List/Find/
+Update/Delete、非法 JSON、错误 Content-Type、未知路由和 405 `Allow` 响应。
+
 提交 MoonBit、配置、文档或 CI 变更前，至少应完成前四项；修改可执行程序或示例时，还应
 执行对应的运行验证。测试覆盖内存 SQLite CRUD 与 CLI 的 `check` 无文件副作用、
 `migrate` 创建数据库及 `run` JSON/错误路径。Docker 运行产生的 `_build/` 和示例

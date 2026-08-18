@@ -25,7 +25,7 @@ test "agent and prompt DSL accept the documented shape" {
 }
 
 ///|
-test "agent DSL rejects directory mismatch, P6 keys, and non-system prompts" {
+test "agent DSL rejects directory mismatch, duplicate tools, and non-system prompts" {
   match
     parse_agent(
       { "id": "other", "name": "Todo", "connector": "default" },
@@ -37,12 +37,17 @@ test "agent DSL rejects directory mismatch, P6 keys, and non-system prompts" {
   }
   match
     parse_agent(
-      { "id": "todo", "name": "Todo", "connector": "default", "tools": [] },
+      {
+        "id": "todo",
+        "name": "Todo",
+        "connector": "default",
+        "tools": ["create", "create"],
+      },
       "todo",
       "agents/todo/agent.json",
     ) {
-    Err(error) => assert_eq(error.path, "agents/todo/agent.json.tools")
-    Ok(_) => fail("expected unknown P6 key")
+    Err(error) => assert_eq(error.path, "agents/todo/agent.json.tools[1]")
+    Ok(_) => fail("expected duplicate tool")
   }
   match
     parse_prompts(

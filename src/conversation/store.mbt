@@ -15,6 +15,7 @@ pub(all) struct Message {
   turn_id : String
   sequence : Int
   role : String
+  kind : String
   content : String
   status : String
   created_at : Int
@@ -71,7 +72,149 @@ pub fn migrate(
       Err(error) => return Err(error)
     }
   }
+  let version = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_migrations WHERE version = 2",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error(
+          "could not inspect conversation migration", "conversation.migrate",
+        ),
+      )
+  }
+  let has_v2 = try {
+    ignore(version.step())
+    let count : Int = version.column(index=0)
+    version.finalize()
+    count > 0
+  } catch {
+    _ => {
+      version.finalize() catch {
+        _ => ()
+      }
+      return Err(
+        @errors.database_error(
+          "could not inspect conversation migration", "conversation.migrate",
+        ),
+      )
+    }
+  }
+  if !has_v2 {
+    let upgrade = [
+      "BEGIN IMMEDIATE", "CREATE TABLE _moonyao_messages_v2 (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES _moonyao_chats(id) ON DELETE CASCADE, turn_id TEXT NOT NULL REFERENCES _moonyao_turns(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')), kind TEXT NOT NULL CHECK(kind IN ('text','tool_calls','tool_result','internal')), content_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('completed','failed')), created_at INTEGER NOT NULL, UNIQUE(chat_id, sequence))",
+      "INSERT INTO _moonyao_messages_v2(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at) SELECT id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at FROM _moonyao_messages",
+      "DROP TABLE _moonyao_messages", "ALTER TABLE _moonyao_messages_v2 RENAME TO _moonyao_messages",
+      "CREATE INDEX _moonyao_messages_chat ON _moonyao_messages(chat_id, sequence)",
+      "INSERT INTO _moonyao_migrations(version) VALUES (2)", "COMMIT",
+    ]
+    for statement in upgrade {
+      match exec(connection, statement, "conversation.migrate.v2") {
+        Ok(_) => ()
+        Err(error) => {
+          rollback(connection)
+          return Err(error)
+        }
+      }
+    }
+  }
   Ok(())
+}
+
+///|
+pub fn append_message(
+  connection : @sqlite3.Connection,
+  id : String,
+  chat_id : String,
+  turn_id : String,
+  role : String,
+  kind : String,
+  content : Json,
+  now : Int,
+) -> Result[Unit, @errors.EngineError] {
+  if !["assistant", "tool"].contains(role) ||
+    !["tool_calls", "tool_result", "internal"].contains(kind) {
+    return Err(
+      @errors.invalid_argument("invalid transcript message", "message"),
+    )
+  }
+  let source = content.stringify()
+  if source.length() > 262144 {
+    return Err(
+      @errors.invalid_argument("transcript message is too large", "message"),
+    )
+  }
+  match exec(connection, "BEGIN IMMEDIATE", "message.append") {
+    Err(error) => return Err(error)
+    Ok(_) => ()
+  }
+  let sequence_statement = connection.prepare(
+    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM _moonyao_messages WHERE chat_id = ?",
+  ) catch {
+    _ => {
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not prepare message sequence", "message"),
+      )
+    }
+  }
+  let sequence = try {
+    sequence_statement.bind(index=1, chat_id)
+    ignore(sequence_statement.step())
+    let value : Int = sequence_statement.column(index=0)
+    sequence_statement.finalize()
+    value
+  } catch {
+    _ => {
+      sequence_statement.finalize() catch {
+        _ => ()
+      }
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not allocate message sequence", "message"),
+      )
+    }
+  }
+  let statement = connection.prepare(
+    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
+  ) catch {
+    _ => {
+      rollback(connection)
+      return Err(
+        @errors.database_error(
+          "could not prepare transcript message", "message",
+        ),
+      )
+    }
+  }
+  try {
+    statement.bind(index=1, id)
+    statement.bind(index=2, chat_id)
+    statement.bind(index=3, turn_id)
+    statement.bind(index=4, sequence)
+    statement.bind(index=5, role)
+    statement.bind(index=6, kind)
+    statement.bind(index=7, source)
+    statement.bind(index=8, now)
+    statement.step_once()
+    statement.finalize()
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not save transcript message", "message"),
+      )
+    }
+  }
+  match exec(connection, "COMMIT", "message.append") {
+    Ok(_) => Ok(())
+    Err(error) => {
+      rollback(connection)
+      Err(error)
+    }
+  }
 }
 
 ///|
@@ -595,7 +738,10 @@ pub fn fail_turn(
 }
 
 ///|
-fn decode_content(source : String) -> String {
+fn decode_content(source : String, kind : String) -> String {
+  if kind != "text" {
+    return source
+  }
   let value = @json.parse(source) catch { _ => return "" }
   match value {
     String(content) => content
@@ -609,7 +755,7 @@ pub fn completed_messages(
   chat_id : String,
 ) -> Result[Array[Message], @errors.EngineError] {
   let statement = connection.prepare(
-    "SELECT m.id, m.chat_id, m.turn_id, m.sequence, m.role, m.content_json, m.status, m.created_at FROM _moonyao_messages m JOIN _moonyao_turns t ON t.id = m.turn_id WHERE m.chat_id = ? AND t.status = 'completed' ORDER BY m.sequence",
+    "SELECT m.id, m.chat_id, m.turn_id, m.sequence, m.role, m.kind, m.content_json, m.status, m.created_at FROM _moonyao_messages m JOIN _moonyao_turns t ON t.id = m.turn_id WHERE m.chat_id = ? AND t.status = 'completed' AND m.kind != 'internal' ORDER BY m.sequence",
   ) catch {
     _ =>
       return Err(
@@ -620,16 +766,18 @@ pub fn completed_messages(
   try {
     statement.bind(index=1, chat_id)
     while statement.step() {
-      let source : String = statement.column(index=5)
+      let kind : String = statement.column(index=5)
+      let source : String = statement.column(index=6)
       messages.push({
         id: statement.column(index=0),
         chat_id: statement.column(index=1),
         turn_id: statement.column(index=2),
         sequence: statement.column(index=3),
         role: statement.column(index=4),
-        content: decode_content(source),
-        status: statement.column(index=6),
-        created_at: statement.column(index=7),
+        kind,
+        content: decode_content(source, kind),
+        status: statement.column(index=7),
+        created_at: statement.column(index=8),
       })
     }
     statement.finalize()
@@ -659,7 +807,7 @@ pub fn list_messages(
     Ok(_) => ()
   }
   let statement = connection.prepare(
-    "SELECT id, chat_id, turn_id, sequence, role, content_json, status, created_at FROM _moonyao_messages WHERE chat_id = ? ORDER BY sequence LIMIT ? OFFSET ?",
+    "SELECT id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at FROM _moonyao_messages WHERE chat_id = ? ORDER BY sequence LIMIT ? OFFSET ?",
   ) catch {
     _ =>
       return Err(
@@ -672,16 +820,18 @@ pub fn list_messages(
     statement.bind(index=2, limit)
     statement.bind(index=3, offset)
     while statement.step() {
-      let source : String = statement.column(index=5)
+      let kind : String = statement.column(index=5)
+      let source : String = statement.column(index=6)
       messages.push({
         id: statement.column(index=0),
         chat_id: statement.column(index=1),
         turn_id: statement.column(index=2),
         sequence: statement.column(index=3),
         role: statement.column(index=4),
-        content: decode_content(source),
-        status: statement.column(index=6),
-        created_at: statement.column(index=7),
+        kind,
+        content: decode_content(source, kind),
+        status: statement.column(index=7),
+        created_at: statement.column(index=8),
       })
     }
     statement.finalize()

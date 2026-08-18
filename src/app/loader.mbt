@@ -271,6 +271,7 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
     for entry in agent_entries {
       let agent_path = agent_directory + "/" + entry + "/agent.json"
       let prompt_path = agent_directory + "/" + entry + "/prompts.json"
+      let tools_path = agent_directory + "/" + entry + "/tools.json"
       if @fs.path_exists(agent_path) {
         let agent_json = match read_json(agent_path) {
           Ok(v) => v
@@ -310,6 +311,74 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
           Ok(v) => v
           Err(e) => return Err(e)
         }
+        let definitions = if @fs.path_exists(tools_path) {
+          let tool_json = match read_json(tools_path) {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+          match
+            @agent.parse_tools(tool_json, "agents/" + entry + "/tools.json") {
+            Ok(v) => v
+            Err(e) => return Err(e)
+          }
+        } else {
+          []
+        }
+        for tool in definitions {
+          if !process_names.contains(tool.process) ||
+            tool.process.has_prefix("agent.") ||
+            tool.process.has_prefix("conversation.") {
+            return Err(
+              @errors.invalid_dsl(
+                "unknown or internal tool process",
+                "agents/" + entry + "/tools.json",
+              ),
+            )
+          }
+        }
+        if !parsed.tool_names.is_empty() && definitions.is_empty() {
+          return Err(
+            @errors.invalid_dsl(
+              "agent tool allowlist requires tools.json",
+              "agents/" + entry + "/tools.json",
+            ),
+          )
+        }
+        let tools : Array[@agent.Tool] = []
+        for name in parsed.tool_names {
+          let mut selected : @agent.Tool? = None
+          for tool in definitions {
+            if tool.name == name {
+              selected = Some(tool)
+            }
+          }
+          let tool = match selected {
+            Some(value) => value
+            None =>
+              return Err(
+                @errors.invalid_dsl(
+                  "unknown tool",
+                  "agents/" + entry + "/agent.json.tools",
+                ),
+              )
+          }
+          tools.push(tool)
+        }
+        for
+          hook in [
+            ("before_process", parsed.before_process),
+            ("after_process", parsed.after_process),
+          ] {
+          let (kind, process) = hook
+          if process.length() > 0 && !process_names.contains(process) {
+            return Err(
+              @errors.invalid_dsl(
+                "unknown hook process",
+                "agents/" + entry + "/agent.json." + kind,
+              ),
+            )
+          }
+        }
         agents.push({
           id: parsed.id,
           name: parsed.name,
@@ -317,6 +386,10 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
           connector: parsed.connector,
           options: parsed.options,
           prompts,
+          tools,
+          tool_names: parsed.tool_names,
+          before_process: parsed.before_process,
+          after_process: parsed.after_process,
         })
       }
     }

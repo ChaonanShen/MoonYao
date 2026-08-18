@@ -16,6 +16,7 @@ test "application loader resolves the example connector, agent, and prompts" {
       assert_eq(application.agents.length(), 1)
       assert_eq(application.agents[0].id, "todo")
       assert_eq(application.agents[0].prompts.length(), 1)
+      assert_eq(application.agents[0].tools.length(), 4)
       assert_true(application.connector is Some(_))
     }
     Err(error) => fail(error.message + " at " + error.path)

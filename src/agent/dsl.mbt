@@ -12,6 +12,10 @@ pub(all) struct Agent {
   connector : String
   options : Options
   prompts : Array[@llm.ChatMessage]
+  tools : Array[Tool]
+  tool_names : Array[String]
+  before_process : String
+  after_process : String
 } derive(Debug)
 
 ///|
@@ -54,7 +58,10 @@ pub fn parse_agent(
   match
     known_keys(
       object,
-      ["id", "name", "description", "connector", "options"],
+      [
+        "id", "name", "description", "connector", "options", "tools", "before_process",
+        "after_process",
+      ],
       path,
     ) {
     Err(error) => return Err(error)
@@ -132,6 +139,48 @@ pub fn parse_agent(
     Some(_) =>
       return Err(@errors.invalid_dsl("expected an object", path + ".options"))
   }
+  let tool_names : Array[String] = []
+  match object.get("tools") {
+    None => ()
+    Some(Array(values)) =>
+      for index = 0; index < values.length(); index = index + 1 {
+        match values[index] {
+          String(value) if @model.is_identifier(value) &&
+            !tool_names.contains(value) => tool_names.push(value)
+          _ =>
+            return Err(
+              @errors.invalid_dsl(
+                "invalid or duplicate tool name",
+                path + ".tools[" + index.to_string() + "]",
+              ),
+            )
+        }
+      }
+    Some(_) =>
+      return Err(@errors.invalid_dsl("expected an array", path + ".tools"))
+  }
+  let before_process = match object.get("before_process") {
+    None => ""
+    Some(String(value)) if value.length() > 0 => value
+    Some(_) =>
+      return Err(
+        @errors.invalid_dsl(
+          "expected a non-empty string",
+          path + ".before_process",
+        ),
+      )
+  }
+  let after_process = match object.get("after_process") {
+    None => ""
+    Some(String(value)) if value.length() > 0 => value
+    Some(_) =>
+      return Err(
+        @errors.invalid_dsl(
+          "expected a non-empty string",
+          path + ".after_process",
+        ),
+      )
+  }
   Ok({
     id,
     name,
@@ -139,6 +188,10 @@ pub fn parse_agent(
     connector,
     options: { temperature, max_tokens },
     prompts: [],
+    tools: [],
+    tool_names,
+    before_process,
+    after_process,
   })
 }
 

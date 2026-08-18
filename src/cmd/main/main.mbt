@@ -98,6 +98,33 @@ fn completion_event_json(event : @llm.CompletionEvent) -> Json {
       }
     @llm.Completed => { "event": "message.completed" }
     @llm.Failed(code) => { "event": "turn.failed", "code": code }
+    @llm.ToolCallStarted(index, id, name) =>
+      {
+        "event": "tool.arguments.started",
+        "index": index,
+        "tool_call_id": id,
+        "name": name,
+      }
+    @llm.ToolArgumentsDelta(index, _) =>
+      { "event": "tool.arguments.delta", "index": index }
+    @llm.ToolCallCompleted(call) =>
+      {
+        "event": "tool.arguments.completed",
+        "tool_call_id": call.id,
+        "name": call.name,
+      }
+    @llm.ToolStarted(id, name) =>
+      { "event": "tool.started", "tool_call_id": id, "name": name }
+    @llm.ToolCompleted(id, name, ok, summary) =>
+      {
+        "event": "tool.completed",
+        "tool_call_id": id,
+        "name": name,
+        "ok": ok,
+        "summary": summary,
+      }
+    @llm.HookStarted(kind) => { "event": "hook.started", "kind": kind }
+    @llm.HookCompleted(kind) => { "event": "hook.completed", "kind": kind }
   }
 }
 
@@ -194,6 +221,14 @@ async fn agent_chat_command(
     message,
     ids,
     now,
+    (process, input) => {
+      let registry = @process.Registry::with_flows(
+        application.models,
+        application.flows,
+        application.globals,
+      )
+      registry.run(connection, process, input)
+    },
     event => println(completion_event_json(event).stringify()),
   )
   let close_result = @sqlite.close_result(connection)

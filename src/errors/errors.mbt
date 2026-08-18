@@ -13,6 +13,9 @@ pub(all) enum ErrorCode {
   ChatNotFound
   TurnConflict
   LlmError
+  ToolError
+  TurnLimitExceeded
+  AgentNotFound
   InternalError
 } derive(Eq, Debug)
 
@@ -40,6 +43,9 @@ pub fn ErrorCode::as_string(self : ErrorCode) -> String {
     ChatNotFound => "chat_not_found"
     TurnConflict => "turn_conflict"
     LlmError => "llm_error"
+    ToolError => "tool_error"
+    TurnLimitExceeded => "turn_limit_exceeded"
+    AgentNotFound => "agent_not_found"
     InternalError => "internal_error"
   }
 }
@@ -105,6 +111,21 @@ pub fn turn_conflict() -> EngineError {
 ///|
 pub fn llm_error(message : String) -> EngineError {
   { code: LlmError, message, path: "llm" }
+}
+
+///|
+pub fn tool_error(message : String) -> EngineError {
+  { code: ToolError, message, path: "tool" }
+}
+
+///|
+pub fn turn_limit_exceeded(message : String) -> EngineError {
+  { code: TurnLimitExceeded, message, path: "turn" }
+}
+
+///|
+pub fn agent_not_found() -> EngineError {
+  { code: AgentNotFound, message: "agent was not found", path: "agent" }
 }
 
 ///|

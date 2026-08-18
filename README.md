@@ -31,6 +31,31 @@ connector。当前尚未实现 RAG、附件或 multi-agent；也不实现 Yao �
 插件、完整应用引擎、OpenAPI、认证、
 多租户、多数据库、Join 或复杂 Flow 控制。
 
+| 能力 | 0.1.0 状态 |
+| --- | --- |
+| Agent/Prompt/Tool 严格 JSON DSL | 支持 |
+| SQLite 持久化 chat、turn、message | 支持，单数据库 |
+| OpenAI-compatible Chat Completions | 支持，单 connector、文本与 SSE |
+| Process tools 与 hooks | 支持，有 allowlist、轮次、数量和大小限制 |
+| Agent JSON API、SSE 与内置 Web CUI | 支持，loopback 本地单用户 |
+| 认证、TLS、CORS、多租户 | 不支持 |
+| 多 provider、RAG、附件、多 Agent、外部 MCP | 不支持 |
+
+## 获取与安装
+
+发布源码和校验记录见 [GitHub Releases](https://github.com/ChaonanShen/MoonYao/releases)。
+从源码运行时克隆 release tag，并在仓库根目录执行本文命令：
+
+```bash
+git clone --branch v0.1.0 https://github.com/ChaonanShen/MoonYao.git
+cd MoonYao
+moon update
+moon build --target native
+```
+
+Mooncakes 发布目标为 `ChaonanShen/MoonYao@0.1.0`。该包包含源码、内置 CUI、两个
+示例和公开文档；它不是全局 CLI 安装器。可用 `moon package --list` 检查将发布的文件。
+
 ## 开发环境
 
 项目必须使用支持 Native 目标的 MoonBit 工具链。请按
@@ -73,7 +98,8 @@ MoonYao Core bootstrap: Native runtime is ready.
 
 ## Agent 快速开始
 
-`example/todo` 包含一个 `todo` Agent。Connector 固定放在
+`example/todo-agent` 是主要发布示例，包含完整的 `todo` Agent、Process 工具和 Todo API。
+Connector 固定放在
 `connectors/default.json`，API key 只填写环境变量名，不写入 DSL：
 
 ```json
@@ -127,9 +153,10 @@ Agent 位于 `agents/<id>/agent.json`，同目录的 `prompts.json` 只接受 1 
 
 ```bash
 export OPENAI_API_KEY='...'
-moon run src/cmd/main -- migrate ./example/todo
-moon run src/cmd/main -- agent chat ./example/todo todo "Help me plan today's tasks"
-moon run src/cmd/main -- agent chat ./example/todo todo "Which one should I do first?" --chat <chat-id>
+moon run src/cmd/main -- check ./example/todo-agent
+moon run src/cmd/main -- migrate ./example/todo-agent
+moon run src/cmd/main -- agent chat ./example/todo-agent todo "Help me plan today's tasks"
+moon run src/cmd/main -- agent chat ./example/todo-agent todo "Which one should I do first?" --chat <chat-id>
 ```
 
 命令在 stdout 逐行输出 `turn.started`、`message.delta`、`tool.started`、
@@ -153,8 +180,8 @@ round、32 个 tool calls，tool result 最大 256 KiB，总预算为 5 分钟�
 
 ```bash
 export OPENAI_API_KEY='...'
-moon run src/cmd/main -- migrate ./example/todo
-moon run src/cmd/main -- serve ./example/todo
+moon run src/cmd/main -- migrate ./example/todo-agent
+moon run src/cmd/main -- serve ./example/todo-agent
 ```
 
 内置 CUI 可选择 Agent，新建、打开、重命名和删除 chat，恢复历史，并用 SSE 显示文本、
@@ -182,6 +209,8 @@ curl -N -X POST http://127.0.0.1:8080/v1/chats/<chat-id>/turns \
 Turn 请求缺省返回一次性 JSON；`Accept: text/event-stream` 返回 `turn.started`、公开的
 message/tool/hook 事件，以及唯一的 `turn.completed` 或 `turn.failed`。SSE 断开不会取消
 Runtime，客户端可重新读取 chat 和 messages 确认最终状态。
+
+完整 endpoint、envelope、SSE event 和限制参考见 [docs/API.md](docs/API.md)。
 
 该平台没有认证、TLS、CORS 或租户隔离，并且 Agent 可以执行其 allowlist 中的 Process
 工具。它只适合绑定 loopback 的可信本地单用户环境，不得直接暴露到公网。`/v1` 和
@@ -227,13 +256,24 @@ Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构�
 绑定尚不支持 NULL，因此 `nullable: true` 和 `default: null` 会在迁移阶段以
 `invalid_dsl` 拒绝；关系、Join、schema diff 和事务编排不在当前范围内。
 
+## 数据、清理与升级
+
+两个示例分别把运行数据写入 `example/todo-agent/todo-agent.db` 和
+`example/todo/todo.db`；数据库及 WAL/SHM 文件已被 Git 忽略。确认服务已停止后可删除这些
+文件以重置本地数据。`migrate` 可重复执行，并会升级内部 conversation schema；0.1.0 不提供
+用户模型 schema diff 或跨版本回滚，升级前应备份数据库。
+
+常见错误：`database does not exist` 表示需要先运行 `migrate`；`connector API key is not
+configured` 表示 DSL 指定的环境变量未设置；provider HTTP、timeout 或畸形 SSE 被统一为
+脱敏的 `llm_error`。不要把服务绑定到公网地址，Process tool 可能产生不可回滚的本地副作用。
+
 ## 实现计划
 
 1. 建立 Agent 工具所需的 Process、Model/SQLite、Flow 与 HTTP 基础。（已完成）
 2. 实现严格 Agent DSL、单一流式 connector 与持久化多轮会话。（已完成）
 3. 实现 Process tools、有限 hooks 与有界 Agent loop。（已完成）
-4. 实现 Agent HTTP/SSE API 与最小本地 Web CUI。
-5. 完成 Agent 主链路的离线验收、文档和发布。
+4. 实现 Agent HTTP/SSE API 与最小本地 Web CUI。（已完成）
+5. 完成 Agent 主链路的离线验收、文档和首次发布。（已完成）
 
 每个有效功能均须先建立 GitHub Issue，并通过聚焦的分支与 Pull Request 实现。
 
@@ -241,6 +281,7 @@ Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构�
 
 MoonYao Core 使用 [Apache License 2.0](LICENSE)，它是 OSI 认可的开源许可证。
 所有外部来源、依赖和许可证记录见 [docs/PROVENANCE.md](docs/PROVENANCE.md)。
+0.1.0 的发布步骤、限制与验收结果见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 Yao 当前仓库的许可证在标准 Apache-2.0 之外还有附加条款；该许可证适用于 Yao，
 不改变 MoonYao 的许可证。MoonYao 只依据公开文档、接口与可观察行为编写规格并独立实现。

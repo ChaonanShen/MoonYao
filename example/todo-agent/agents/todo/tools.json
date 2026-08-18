@@ -1,0 +1,71 @@
+[
+  {
+    "name": "create_todo",
+    "description": "Create one Todo item.",
+    "process": "models.todo.Create",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "done": { "type": "boolean" }
+          },
+          "required": ["title"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["data"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_todos",
+    "description": "List Todo items, optionally filtering their completion state.",
+    "process": "models.todo.List",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "where": {
+          "type": "object",
+          "properties": { "done": { "type": "boolean" } },
+          "additionalProperties": false
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "offset": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "complete_todo",
+    "description": "Mark one Todo item as completed.",
+    "process": "models.todo.Update",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "data": {
+          "type": "object",
+          "properties": { "done": { "type": "boolean", "enum": [true] } },
+          "required": ["done"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["id", "data"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "delete_todo",
+    "description": "Delete one Todo item by ID.",
+    "process": "models.todo.Delete",
+    "input_schema": {
+      "type": "object",
+      "properties": { "id": { "type": "integer", "minimum": 1 } },
+      "required": ["id"],
+      "additionalProperties": false
+    }
+  }
+]

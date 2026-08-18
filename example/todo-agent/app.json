@@ -1,0 +1,5 @@
+{
+  "name": "Todo Agent Example",
+  "database": "todo-agent.db",
+  "listen": "127.0.0.1:8080"
+}

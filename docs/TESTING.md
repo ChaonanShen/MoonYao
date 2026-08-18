@@ -21,6 +21,7 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev check --
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev test --target native
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev build --target native
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- bootstrap
+docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- check ./example/todo-agent
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- check ./example/todo
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- migrate ./example/todo
 ```
@@ -34,6 +35,12 @@ before/after hooks。Agent 平台测试覆盖严格 request/query、metadata 脱
 分页、internal transcript 隔离、active-turn 冲突、SSE escaping/公开事件过滤，以及真实
 TCP 上的 JSON turn、SSE terminal event、CUI 静态资源和 CSP/security headers。
 
+fake provider 监听动态 `127.0.0.1:0` 端口，由测试 task group 管理生命周期。覆盖普通文本、
+分块文本、三轮 history、tool create、非法参数修复、allowlist、HTTP 429/500、timeout、非法
+JSON、缺少 `[DONE]` 的中途断开，以及 tool arguments 分片聚合。matcher 验证 model、messages、
+tools、stream 和 Authorization 是否存在，但断言及错误输出不包含 bearer 值。可靠性 smoke
+连续完成 20 个 turn，并并发运行两个独立 chat runtime。
+
 Todo CRUD 是 Agent 工具基础设施的回归路径。HTTP 变更还需启动 `serve ./example/todo`，以
 真实 TCP 请求覆盖 Create/List/Find/Update/Delete、非法 JSON、错误 Content-Type、未知路由
 和 405 `Allow` 响应。
@@ -44,6 +51,9 @@ Todo CRUD 是 Agent 工具基础设施的回归路径。HTTP 变更还需启动 
 
 人工验证真实 provider 时，先运行 `migrate`，再设置 DSL 所指向的环境变量并执行
 `agent chat`；不得把 key 写进 fixture、命令日志或仓库文件。
+
+0.1.0 发布验收日为 2026-08-18。自动离线验收已执行；当前环境没有提供真实 connector
+凭据，因此真实 provider 三轮、工具循环和无效 key 人工检查未执行，不能将其解读为通过。
 
 提交 MoonBit、配置、文档或 CI 变更前，至少应完成前四项；修改可执行程序或示例时，还应
 执行对应的运行验证。测试覆盖 Agent fake-client 主链路、CLI `check` 无文件副作用、
@@ -81,3 +91,19 @@ moon build --target native
 ```
 
 CI 通过是合并条件，但不替代开发者在 Docker 中完成的本地验证。
+
+## Package 验收
+
+以下命令生成并列出 Mooncakes artifact，再从空目录中的解包内容运行离线命令：
+
+```bash
+docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev package --list
+MOONYAO_PACKAGE_DIR=$(mktemp -d "$PWD/../moonyao-package.XXXXXX")
+unzip _build/publish/ChaonanShen-MoonYao-0.1.0.zip -d "$MOONYAO_PACKAGE_DIR"
+docker run --rm --mount "type=bind,src=$MOONYAO_PACKAGE_DIR,dst=/workspace" moonyao-dev check --target native
+docker run --rm --mount "type=bind,src=$MOONYAO_PACKAGE_DIR,dst=/workspace" moonyao-dev run src/cmd/main -- check ./example/todo-agent
+rm -r "$MOONYAO_PACKAGE_DIR"
+```
+
+检查清单不得包含 `.local.*`、`.env`、数据库、WAL/SHM、日志、`_build` 或 `target`。临时目录
+和测试数据库在验收后删除；服务测试必须关闭 listener，不得遗留进程或固定端口。

@@ -10,6 +10,7 @@ RUN apt-get update \
 
 # Keep the MoonBit toolchain below only stable operating-system layers. A
 # Dockerfile change after this instruction does not download it again.
+ENV MOONBIT_INSTALL_VERSION="0.10.8+8606a5800"
 RUN curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
 
 # Native builds use the MoonBit backend plus a C compiler/linker driver.

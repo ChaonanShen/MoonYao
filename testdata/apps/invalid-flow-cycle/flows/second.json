@@ -1,0 +1,1 @@
+{ "id": "second", "name": "Second", "nodes": [{ "name": "next", "process": "flows.first", "input": {} }], "output": "$res.next" }

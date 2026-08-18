@@ -20,7 +20,7 @@ fn check_command(app_dir : String) -> Result[String, @errors.EngineError] {
   match @app.load(app_dir) {
     Ok(application) =>
       Ok(
-        "checked application '\{application.name}' with \{application.models.length()} model(s)",
+        "checked application '\{application.name}' with \{application.models.length()} model(s) and \{application.flows.length()} flow(s)",
       )
     Err(error) => Err(error)
   }
@@ -81,7 +81,11 @@ fn run_process_command(
     Ok(value) => value
     Err(error) => return Err(error)
   }
-  let registry = @process.Registry::new(application.models)
+  let registry = @process.Registry::with_flows(
+    application.models,
+    application.flows,
+    application.globals,
+  )
   let result = registry.run(connection, process, input)
   let close_result = @sqlite.close_result(connection)
   match result {

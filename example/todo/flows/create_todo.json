@@ -1,0 +1,17 @@
+{
+  "id": "create_todo",
+  "name": "Create Todo",
+  "nodes": [
+    {
+      "name": "todo",
+      "process": "models.todo.Create",
+      "input": {
+        "data": {
+          "title": "$in.body.title",
+          "done": false
+        }
+      }
+    }
+  ],
+  "output": "$res.todo"
+}

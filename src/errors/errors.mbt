@@ -56,6 +56,11 @@ pub fn process_not_found(name : String) -> EngineError {
 }
 
 ///|
+pub fn flow_not_found(name : String) -> EngineError {
+  { code: FlowNotFound, message: "flow '\{name}' was not found", path: "flow" }
+}
+
+///|
 pub fn record_not_found(path : String) -> EngineError {
   { code: RecordNotFound, message: "record was not found", path }
 }

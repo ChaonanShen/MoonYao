@@ -23,6 +23,14 @@ test "check is side-effect free while migrate and run use the configured databas
     Err(error) => abort(error.message)
   }
   assert_true(created.contains("\"title\":\"from cli\""))
+  let flowed = match
+    execute([
+      "run", app_dir, "flows.create_todo", "{\"body\":{\"title\":\"from flow\"}}",
+    ]) {
+    Ok(output) => output
+    Err(error) => abort(error.message)
+  }
+  assert_true(flowed.contains("\"title\":\"from flow\""))
   match execute(["run", app_dir, "models.todo.Find", "{\"id\":999}"]) {
     Err(error) => assert_eq(error.code, @errors.RecordNotFound)
     Ok(_) => abort("expected missing record")

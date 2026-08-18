@@ -12,8 +12,8 @@ JSON DSL -> 应用加载 -> SQLite CRUD / Process -> 顺序 Flow -> HTTP API
 
 ## 当前状态
 
-仓库当前已完成 JSON 应用/模型 DSL 校验、SQLite schema 迁移、模型 CRUD Process，以及
-对应的 Native CLI。Flow 和 HTTP 尚未实现。
+仓库当前已完成 JSON 应用/模型 DSL 校验、SQLite schema 迁移、模型 CRUD Process、严格
+值绑定与顺序 Flow，以及对应的 Native CLI。HTTP 和 Agent 尚未实现。
 
 ## 支持范围
 
@@ -73,6 +73,7 @@ moon run src/cmd/main -- run ./example/todo models.todo.List '{"where":{"done":f
 moon run src/cmd/main -- run ./example/todo models.todo.Update '{"id":1,"data":{"done":true}}'
 moon run src/cmd/main -- run ./example/todo models.todo.Find '{"id":1}'
 moon run src/cmd/main -- run ./example/todo models.todo.Delete '{"id":1}'
+moon run src/cmd/main -- run ./example/todo flows.create_todo '{"body":{"title":"learn Flow"}}'
 ```
 
 `check` 只校验 DSL，不创建数据库；`migrate` 幂等创建尚不存在的表；`run` 接受一个
@@ -89,7 +90,7 @@ Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构�
 1. 定义结构化错误和单一 JSON 值的 Process 协议。
 2. 在无副作用条件下加载并校验 Model DSL。
 3. 实现 SQLite Schema 创建及全部使用参数绑定的 CRUD Process。
-4. 实现输入/结果绑定与顺序 Flow。
+4. 实现输入/结果绑定与顺序 Flow。（已完成）
 5. 实现 HTTP 路由、CLI 子命令与 Todo 端到端示例。
 
 每个有效功能均须先建立 GitHub Issue，并通过聚焦的分支与 Pull Request 实现。

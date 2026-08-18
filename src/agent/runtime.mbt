@@ -19,6 +19,7 @@ pub(all) struct TurnResult {
   content : String
   events : Array[@llm.CompletionEvent]
   history_truncated : Bool
+  usage : @llm.Usage
 } derive(Debug)
 
 ///|
@@ -199,7 +200,7 @@ fn fail_active_turn(
   connection : @sqlite3.Connection,
   turn_id : String,
   error : @errors.EngineError,
-  now : Int,
+  now : Int64,
   sink : (@llm.CompletionEvent) -> Unit,
 ) -> @errors.EngineError {
   ignore(
@@ -417,11 +418,11 @@ pub async fn run_turn(
   existing_chat_id : String?,
   input : String,
   ids : Ids,
-  now : Int,
+  now : Int64,
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
   sink : (@llm.CompletionEvent) -> Unit,
 ) -> Result[TurnResult, @errors.EngineError] {
-  let started_at = @env.now().to_int()
+  let started_at = @env.now().reinterpret_as_int64()
   match build_history(agent.prompts, [], input) {
     Ok(_) => ()
     Err(error) => return Err(error)
@@ -480,7 +481,7 @@ pub async fn run_turn(
   let mut metadata : Json = Json::object(Map([]))
   let all_events : Array[@llm.CompletionEvent] = []
   if agent.before_process.length() > 0 {
-    if @env.now().to_int() - started_at > 300000 {
+    if @env.now().reinterpret_as_int64() - started_at > 300000 {
       let error = @errors.turn_limit_exceeded("turn deadline exceeded")
       return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
     }
@@ -500,7 +501,7 @@ pub async fn run_turn(
       Err(error) =>
         return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
     }
-    if @env.now().to_int() - started_at > 300000 {
+    if @env.now().reinterpret_as_int64() - started_at > 300000 {
       let error = @errors.turn_limit_exceeded(
         "turn deadline exceeded after before hook",
       )
@@ -559,7 +560,7 @@ pub async fn run_turn(
   let mut prompt_tokens = 0
   let mut completion_tokens = 0
   while round < 8 {
-    if @env.now().to_int() - started_at > 300000 {
+    if @env.now().reinterpret_as_int64() - started_at > 300000 {
       let error = @errors.turn_limit_exceeded("turn deadline exceeded")
       return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
     }
@@ -654,7 +655,7 @@ pub async fn run_turn(
             match validate_arguments(value, tool.input_schema) {
               Err(error) => Err(error)
               Ok(_) =>
-                if @env.now().to_int() - started_at > 300000 {
+                if @env.now().reinterpret_as_int64() - started_at > 300000 {
                   Err(
                     @errors.turn_limit_exceeded(
                       "turn deadline exceeded before tool execution",
@@ -662,7 +663,7 @@ pub async fn run_turn(
                   )
                 } else {
                   let result = invoke(tool.process, value)
-                  if @env.now().to_int() - started_at > 300000 {
+                  if @env.now().reinterpret_as_int64() - started_at > 300000 {
                     Err(
                       @errors.turn_limit_exceeded(
                         "turn deadline exceeded after tool execution",
@@ -742,7 +743,7 @@ pub async fn run_turn(
     }
     let mut final_content = content
     if agent.after_process.length() > 0 {
-      if @env.now().to_int() - started_at > 300000 {
+      if @env.now().reinterpret_as_int64() - started_at > 300000 {
         let error = @errors.turn_limit_exceeded("turn deadline exceeded")
         return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
       }
@@ -763,7 +764,7 @@ pub async fn run_turn(
             fail_active_turn(connection, ids.turn_id, error, now, sink),
           )
       }
-      if @env.now().to_int() - started_at > 300000 {
+      if @env.now().reinterpret_as_int64() - started_at > 300000 {
         let error = @errors.turn_limit_exceeded(
           "turn deadline exceeded after after hook",
         )
@@ -836,6 +837,7 @@ pub async fn run_turn(
           content: final_content,
           events: all_events,
           history_truncated: history.truncated,
+          usage: total_usage,
         })
       }
       Err(error) =>

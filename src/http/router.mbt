@@ -218,6 +218,17 @@ pub fn validate_route(
   route : Route,
   diagnostic : String,
 ) -> Result[Unit, @errors.EngineError] {
+  if route.path == "/v1" ||
+    route.path.has_prefix("/v1/") ||
+    route.path == "/agent" ||
+    route.path.has_prefix("/agent/") {
+    return Err(
+      @errors.invalid_dsl(
+        "route uses a reserved system namespace",
+        diagnostic + ".path",
+      ),
+    )
+  }
   if !["GET", "POST", "PATCH", "DELETE"].contains(route.verb) {
     return Err(
       @errors.invalid_dsl("unsupported HTTP method", diagnostic + ".method"),

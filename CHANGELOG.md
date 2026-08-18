@@ -22,3 +22,7 @@
 - SQLite 持久化 chat/turn/message、崩溃恢复、完整 turn 历史裁剪与 `agent chat` CLI。
 - Process-backed Agent tools、受限 JSON Schema、流式 tool-call 聚合、有界执行循环、持久化
   tool transcript，以及可选的 Process-backed before/after hooks。
+- 本地单用户 Agent JSON API、实时 SSE turn、持久化 chat 管理，以及无外部前端依赖的内置
+  Web CUI；包含 request ID、CSP、安全响应头和断线后继续持久化。
+- Conversation chat、message 和 turn 时间字段改用 64 位 Unix milliseconds，避免长时间戳
+  截断并保持 API 排序稳定。

@@ -75,4 +75,10 @@ test "router rejects invalid route declarations" {
     Err(error) => assert_eq(error.code, @errors.InvalidDsl)
     Ok(_) => abort("expected duplicate parameter")
   }
+  for path in ["/v1/chats", "/agent/app.js"] {
+    match validate_route(route("GET", path), "apis/todo.json.routes[0]") {
+      Err(error) => assert_eq(error.code, @errors.InvalidDsl)
+      Ok(_) => abort("expected reserved namespace error")
+    }
+  }
 }

@@ -4,8 +4,8 @@ pub(all) struct Chat {
   agent_id : String
   title : String
   status : String
-  created_at : Int
-  updated_at : Int
+  created_at : Int64
+  updated_at : Int64
 } derive(Eq, Debug)
 
 ///|
@@ -18,7 +18,26 @@ pub(all) struct Message {
   kind : String
   content : String
   status : String
-  created_at : Int
+  created_at : Int64
+} derive(Eq, Debug)
+
+///|
+pub(all) struct Turn {
+  id : String
+  chat_id : String
+  status : String
+  error_code : String
+  error_message : String
+  prompt_tokens : Int
+  completion_tokens : Int
+  started_at : Int64
+  finished_at : Int64
+} derive(Eq, Debug)
+
+///|
+pub(all) struct PublicMessage {
+  message : Message
+  turn_status : String
 } derive(Eq, Debug)
 
 ///|
@@ -129,7 +148,7 @@ pub fn append_message(
   role : String,
   kind : String,
   content : Json,
-  now : Int,
+  now : Int64,
 ) -> Result[Unit, @errors.EngineError] {
   if !["assistant", "tool"].contains(role) ||
     !["tool_calls", "tool_result", "internal"].contains(kind) {
@@ -220,7 +239,7 @@ pub fn append_message(
 ///|
 pub fn recover_active(
   connection : @sqlite3.Connection,
-  now : Int,
+  now : Int64,
 ) -> Result[Int, @errors.EngineError] {
   let count_statement = connection.prepare(
     "SELECT COUNT(*) FROM _moonyao_turns WHERE status = 'active'",
@@ -284,7 +303,7 @@ pub fn create_chat(
   id : String,
   agent_id : String,
   title : String,
-  now : Int,
+  now : Int64,
 ) -> Result[Chat, @errors.EngineError] {
   let statement = connection.prepare(
     "INSERT INTO _moonyao_chats(id, agent_id, title, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)",
@@ -396,11 +415,155 @@ pub fn list_chats(
 }
 
 ///|
+pub fn list_chats_for_agent(
+  connection : @sqlite3.Connection,
+  agent_id : String,
+  limit : Int,
+  offset : Int,
+) -> Result[Array[Chat], @errors.EngineError] {
+  if limit < 1 || limit > 100 || offset < 0 {
+    return Err(@errors.invalid_argument("invalid pagination", "query"))
+  }
+  let statement = connection.prepare(
+    "SELECT id, agent_id, title, status, created_at, updated_at FROM _moonyao_chats WHERE status = 'active' AND (? = '' OR agent_id = ?) ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?",
+  ) catch {
+    _ =>
+      return Err(@errors.database_error("could not prepare chat list", "chat"))
+  }
+  let chats : Array[Chat] = []
+  try {
+    statement.bind(index=1, agent_id)
+    statement.bind(index=2, agent_id)
+    statement.bind(index=3, limit)
+    statement.bind(index=4, offset)
+    while statement.step() {
+      chats.push({
+        id: statement.column(index=0),
+        agent_id: statement.column(index=1),
+        title: statement.column(index=2),
+        status: statement.column(index=3),
+        created_at: statement.column(index=4),
+        updated_at: statement.column(index=5),
+      })
+    }
+    statement.finalize()
+    Ok(chats)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not list chats", "chat"))
+    }
+  }
+}
+
+///|
+pub fn count_chats(
+  connection : @sqlite3.Connection,
+  agent_id : String,
+) -> Result[Int, @errors.EngineError] {
+  let statement = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_chats WHERE status = 'active' AND (? = '' OR agent_id = ?)",
+  ) catch {
+    _ =>
+      return Err(@errors.database_error("could not prepare chat count", "chat"))
+  }
+  try {
+    statement.bind(index=1, agent_id)
+    statement.bind(index=2, agent_id)
+    ignore(statement.step())
+    let count : Int = statement.column(index=0)
+    statement.finalize()
+    Ok(count)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not count chats", "chat"))
+    }
+  }
+}
+
+///|
+pub fn get_turn(
+  connection : @sqlite3.Connection,
+  id : String,
+) -> Result[Turn, @errors.EngineError] {
+  let statement = connection.prepare(
+    "SELECT id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, started_at, finished_at FROM _moonyao_turns WHERE id = ?",
+  ) catch {
+    _ =>
+      return Err(@errors.database_error("could not prepare turn query", "turn"))
+  }
+  try {
+    statement.bind(index=1, id)
+    if !statement.step() {
+      statement.finalize()
+      return Err(@errors.invalid_argument("turn was not found", "turn"))
+    }
+    let turn : Turn = {
+      id: statement.column(index=0),
+      chat_id: statement.column(index=1),
+      status: statement.column(index=2),
+      error_code: statement.column(index=3),
+      error_message: statement.column(index=4),
+      prompt_tokens: statement.column(index=5),
+      completion_tokens: statement.column(index=6),
+      started_at: statement.column(index=7),
+      finished_at: statement.column(index=8),
+    }
+    statement.finalize()
+    Ok(turn)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not read turn", "turn"))
+    }
+  }
+}
+
+///|
+pub fn active_turn_id(
+  connection : @sqlite3.Connection,
+  chat_id : String,
+) -> Result[String, @errors.EngineError] {
+  let statement = connection.prepare(
+    "SELECT id FROM _moonyao_turns WHERE chat_id = ? AND status = 'active' LIMIT 1",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not inspect active turn", "chat"),
+      )
+  }
+  try {
+    statement.bind(index=1, chat_id)
+    let id : String = if statement.step() {
+      statement.column(index=0)
+    } else {
+      ""
+    }
+    statement.finalize()
+    Ok(id)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not inspect active turn", "chat"))
+    }
+  }
+}
+
+///|
 pub fn rename_chat(
   connection : @sqlite3.Connection,
   id : String,
   title : String,
-  now : Int,
+  now : Int64,
 ) -> Result[Unit, @errors.EngineError] {
   if title.length() == 0 || title.length() > 200 {
     return Err(@errors.invalid_argument("invalid chat title", "chat.title"))
@@ -441,7 +604,7 @@ pub fn begin_turn(
   message_id : String,
   chat_id : String,
   content : String,
-  now : Int,
+  now : Int64,
 ) -> Result[Unit, @errors.EngineError] {
   match get_chat(connection, chat_id) {
     Err(e) => return Err(e)
@@ -546,7 +709,7 @@ pub fn complete_turn(
   turn_id : String,
   content : String,
   usage : @llm.Usage,
-  now : Int,
+  now : Int64,
 ) -> Result[Unit, @errors.EngineError] {
   if content.length() == 0 {
     return Err(@errors.llm_error("model returned empty text"))
@@ -709,7 +872,7 @@ pub fn fail_turn(
   turn_id : String,
   code : String,
   message : String,
-  now : Int,
+  now : Int64,
 ) -> Result[Unit, @errors.EngineError] {
   let statement = connection.prepare(
     "UPDATE _moonyao_turns SET status = 'failed', error_code = ?, error_message = ?, finished_at = ? WHERE id = ? AND status = 'active'",
@@ -842,6 +1005,98 @@ pub fn list_messages(
         _ => ()
       }
       Err(@errors.database_error("could not list messages", "message"))
+    }
+  }
+}
+
+///|
+pub fn list_public_messages(
+  connection : @sqlite3.Connection,
+  chat_id : String,
+  limit : Int,
+  offset : Int,
+) -> Result[Array[PublicMessage], @errors.EngineError] {
+  if limit < 1 || limit > 100 || offset < 0 {
+    return Err(@errors.invalid_argument("invalid pagination", "query"))
+  }
+  match get_chat(connection, chat_id) {
+    Err(error) => return Err(error)
+    Ok(_) => ()
+  }
+  let statement = connection.prepare(
+    "SELECT m.id, m.chat_id, m.turn_id, m.sequence, m.role, m.kind, m.content_json, m.status, m.created_at, t.status FROM _moonyao_messages m JOIN _moonyao_turns t ON t.id = m.turn_id WHERE m.chat_id = ? AND m.kind != 'internal' ORDER BY m.sequence ASC LIMIT ? OFFSET ?",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error(
+          "could not prepare public message list", "message",
+        ),
+      )
+  }
+  let messages : Array[PublicMessage] = []
+  try {
+    statement.bind(index=1, chat_id)
+    statement.bind(index=2, limit)
+    statement.bind(index=3, offset)
+    while statement.step() {
+      let kind : String = statement.column(index=5)
+      let source : String = statement.column(index=6)
+      messages.push({
+        message: {
+          id: statement.column(index=0),
+          chat_id: statement.column(index=1),
+          turn_id: statement.column(index=2),
+          sequence: statement.column(index=3),
+          role: statement.column(index=4),
+          kind,
+          content: decode_content(source, kind),
+          status: statement.column(index=7),
+          created_at: statement.column(index=8),
+        },
+        turn_status: statement.column(index=9),
+      })
+    }
+    statement.finalize()
+    Ok(messages)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not list public messages", "message"))
+    }
+  }
+}
+
+///|
+pub fn count_public_messages(
+  connection : @sqlite3.Connection,
+  chat_id : String,
+) -> Result[Int, @errors.EngineError] {
+  match get_chat(connection, chat_id) {
+    Err(error) => return Err(error)
+    Ok(_) => ()
+  }
+  let statement = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_messages WHERE chat_id = ? AND kind != 'internal'",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not prepare message count", "message"),
+      )
+  }
+  try {
+    statement.bind(index=1, chat_id)
+    ignore(statement.step())
+    let count : Int = statement.column(index=0)
+    statement.finalize()
+    Ok(count)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not count messages", "message"))
     }
   }
 }

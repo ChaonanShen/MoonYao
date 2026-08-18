@@ -48,7 +48,7 @@ async test "fake client runs three persisted turns and restart-compatible histor
         existing,
         "question" + suffix,
         ids,
-        index,
+        index.to_int64(),
         (_, _) => Err(@errors.internal_error("unexpected invocation", "test")),
         _ => (),
       ) {

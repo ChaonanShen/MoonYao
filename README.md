@@ -20,14 +20,15 @@ Model、Process、Flow、SQLite 和 HTTP 不是独立的通用应用引擎产品
 
 仓库当前已完成严格 Agent/Connector/Prompt DSL、SQLite 持久化 chat/turn/message、
 OpenAI-compatible 普通及流式 Chat Completions、`agent chat` 多轮会话、受限 JSON Schema、
-Process-backed tools、有界 tool loop 和可选 Process hooks。作为 Agent 工具基础，仓库也已
-完成 Model/Process/Flow DSL、SQLite CRUD 和异步 HTTP/1.1 Todo API。
+Process-backed tools、有界 tool loop、可选 Process hooks，以及本地 Agent JSON/SSE API
+和内置 Web CUI。作为 Agent 工具基础，仓库也已完成 Model/Process/Flow DSL、SQLite CRUD
+和异步 HTTP/1.1 Todo API。
 
 ## 支持范围
 
 第一版仅支持 MoonBit Native、SQLite、严格 JSON DSL 和单一 OpenAI-compatible 文本
-connector。当前尚未实现 Agent HTTP/SSE、Web CUI、RAG、附件或 multi-agent；也不实现
-Yao 的 JavaScript 运行时、插件、完整应用引擎、OpenAPI、认证、
+connector。当前尚未实现 RAG、附件或 multi-agent；也不实现 Yao 的 JavaScript 运行时、
+插件、完整应用引擎、OpenAPI、认证、
 多租户、多数据库、Join 或复杂 Flow 控制。
 
 ## 开发环境
@@ -145,6 +146,46 @@ round、32 个 tool calls，tool result 最大 256 KiB，总预算为 5 分钟�
 
 `check` 不读取 API key、不联网也不访问数据库；key 仅在发起模型请求时读取，Authorization、
 完整 prompt、tool 参数和响应正文不会写入默认错误信息。
+
+## 本地 Agent 平台
+
+完成迁移后启动服务并打开 `http://127.0.0.1:8080/agent/`：
+
+```bash
+export OPENAI_API_KEY='...'
+moon run src/cmd/main -- migrate ./example/todo
+moon run src/cmd/main -- serve ./example/todo
+```
+
+内置 CUI 可选择 Agent，新建、打开、重命名和删除 chat，恢复历史，并用 SSE 显示文本、
+工具和 hook 事件。页面资源编译进二进制，不依赖 Node、npm、CDN 或第三方脚本；消息内容只
+按纯文本渲染，不解析 Markdown 或 HTML。
+
+同一服务也提供固定 `/v1` API。成功响应使用 `{"data":...}` envelope，列表响应另含
+`meta.limit`、`meta.offset` 和 `meta.total`；错误使用稳定的 `error.code/message/path`，并
+返回 `X-Request-Id`：
+
+```bash
+curl http://127.0.0.1:8080/v1/health
+curl http://127.0.0.1:8080/v1/agents
+curl -X POST http://127.0.0.1:8080/v1/chats \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id":"todo","title":"Today"}'
+curl 'http://127.0.0.1:8080/v1/chats?agent_id=todo&limit=20&offset=0'
+curl http://127.0.0.1:8080/v1/chats/<chat-id>/messages
+curl -N -X POST http://127.0.0.1:8080/v1/chats/<chat-id>/turns \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"content":"List my open tasks"}'
+```
+
+Turn 请求缺省返回一次性 JSON；`Accept: text/event-stream` 返回 `turn.started`、公开的
+message/tool/hook 事件，以及唯一的 `turn.completed` 或 `turn.failed`。SSE 断开不会取消
+Runtime，客户端可重新读取 chat 和 messages 确认最终状态。
+
+该平台没有认证、TLS、CORS 或租户隔离，并且 Agent 可以执行其 allowlist 中的 Process
+工具。它只适合绑定 loopback 的可信本地单用户环境，不得直接暴露到公网。`/v1` 和
+`/agent` 是系统保留命名空间，不能由应用 API DSL 覆盖。
 
 ## Todo 工具基础示例
 

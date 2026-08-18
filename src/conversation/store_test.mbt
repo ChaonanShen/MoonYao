@@ -157,3 +157,48 @@ test "conversation migration upgrades the P5 text-only message table" {
   }
   connection.close()
 }
+
+///|
+test "platform queries filter chats, hide internal messages, and report active turns" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(migrate(connection))
+  ignore(create_chat(connection, "a", "todo", "Todo", 1))
+  ignore(create_chat(connection, "b", "other", "Other", 2))
+  match list_chats_for_agent(connection, "todo", 20, 0) {
+    Ok(chats) => assert_eq(chats.length(), 1)
+    Err(error) => fail(error.message)
+  }
+  match count_chats(connection, "") {
+    Ok(count) => assert_eq(count, 2)
+    Err(error) => fail(error.message)
+  }
+  ignore(begin_turn(connection, "turn", "user", "a", "hello", 3))
+  match active_turn_id(connection, "a") {
+    Ok(id) => assert_eq(id, "turn")
+    Err(error) => fail(error.message)
+  }
+  ignore(
+    append_message(
+      connection,
+      "internal",
+      "a",
+      "turn",
+      "assistant",
+      "internal",
+      { "messages": [] },
+      4,
+    ),
+  )
+  match list_public_messages(connection, "a", 20, 0) {
+    Ok(messages) => {
+      assert_eq(messages.length(), 1)
+      assert_eq(messages[0].turn_status, "active")
+    }
+    Err(error) => fail(error.message)
+  }
+  match count_public_messages(connection, "a") {
+    Ok(count) => assert_eq(count, 1)
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}

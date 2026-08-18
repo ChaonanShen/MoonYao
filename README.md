@@ -64,6 +64,10 @@ MoonYao Core bootstrap: Native runtime is ready.
 
 ## 实现计划
 
+实施路线、阶段验收和人工验证入口见 [docs/plans/P0-foundation.md](docs/plans/P0-foundation.md)；
+第一版的稳定架构、Process 协议和安全约束见
+[docs/architecture.md](docs/architecture.md)。后续按以下顺序推进：
+
 1. 定义结构化错误和单一 JSON 值的 Process 协议。
 2. 在无副作用条件下加载并校验 Model DSL。
 3. 实现 SQLite Schema 创建及全部使用参数绑定的 CRUD Process。

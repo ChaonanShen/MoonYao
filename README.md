@@ -40,7 +40,8 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev build --
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main
 ```
 
-Docker 容器是本地开发与测试环境；GitHub Actions 运行相同的四项检查，以防止未在
+Docker 容器是正式的本地开发与测试环境；详细的测试范围、执行方式和缓存策略见
+[docs/TESTING.md](docs/TESTING.md)。GitHub Actions 运行相同的四项检查，以防止未在
 本地执行的变更进入 `main`。
 
 ## 直接构建、测试与运行

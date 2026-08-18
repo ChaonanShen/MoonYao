@@ -1,7 +1,13 @@
 import {
   "ChaonanShen/MoonYao/app",
+  "ChaonanShen/MoonYao/errors",
+  "ChaonanShen/MoonYao/model",
+  "ChaonanShen/MoonYao/process",
+  "ChaonanShen/MoonYao/sqlite",
   "ChaonanShen/MoonYao" @moonyao,
   "moonbitlang/core/env",
+  "moonbitlang/core/json",
+  "moonbitlang/x/fs",
   "moonbitlang/x/sys",
 }
 

@@ -12,9 +12,8 @@ JSON DSL -> 应用加载 -> SQLite CRUD / Process -> 顺序 Flow -> HTTP API
 
 ## 当前状态
 
-仓库当前完成 M1 基础骨架：MoonBit Native 模块、最小可执行程序、单元测试及 GitHub
-Actions 持续集成。SQLite、JSON DSL、Process 调度、Flow、HTTP 和面向用户的 CLI
-子命令尚未实现。
+仓库当前已完成 JSON 应用/模型 DSL 校验、SQLite schema 迁移、模型 CRUD Process，以及
+对应的 Native CLI。Flow 和 HTTP 尚未实现。
 
 ## 支持范围
 
@@ -62,16 +61,28 @@ moon run src/cmd/main -- bootstrap
 MoonYao Core bootstrap: Native runtime is ready.
 ```
 
-## DSL 检查
+## Todo 快速开始
 
-当前 CLI 提供无副作用的应用 DSL 校验：
+仓库中的 `example/todo` 可以直接迁移并调用 Process：
 
 ```bash
-moon run src/cmd/main -- check ./testdata/apps/valid
+moon run src/cmd/main -- check ./example/todo
+moon run src/cmd/main -- migrate ./example/todo
+moon run src/cmd/main -- run ./example/todo models.todo.Create '{"data":{"title":"learn MoonBit"}}'
+moon run src/cmd/main -- run ./example/todo models.todo.List '{"where":{"done":false},"limit":20,"offset":0}'
+moon run src/cmd/main -- run ./example/todo models.todo.Update '{"id":1,"data":{"done":true}}'
+moon run src/cmd/main -- run ./example/todo models.todo.Find '{"id":1}'
+moon run src/cmd/main -- run ./example/todo models.todo.Delete '{"id":1}'
 ```
 
-合法应用会输出应用摘要；非法 JSON DSL 会以非零退出码返回结构化 JSON 错误。SQLite
-迁移、Process 调用和 HTTP 服务将在后续版本提供。
+`check` 只校验 DSL，不创建数据库；`migrate` 幂等创建尚不存在的表；`run` 接受一个
+Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构化 JSON 错误并以非零状态
+退出。数据库路径相对于应用目录解析。
+
+当前 CRUD 仅支持字段等值 `where`、非负 `limit`/`offset`，不接受 SQL 或查询 DSL
+字符串。模型标识符必须先通过 DSL 校验，所有运行时值均使用 SQLite 参数绑定。SQLite
+绑定尚不支持 NULL，因此 `nullable: true` 和 `default: null` 会在迁移阶段以
+`invalid_dsl` 拒绝；关系、Join、schema diff 和事务编排不在当前范围内。
 
 ## 实现计划
 

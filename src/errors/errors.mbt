@@ -42,6 +42,30 @@ pub fn invalid_dsl(message : String, path : String) -> EngineError {
 }
 
 ///|
+pub fn invalid_argument(message : String, path : String) -> EngineError {
+  { code: InvalidArgument, message, path }
+}
+
+///|
+pub fn process_not_found(name : String) -> EngineError {
+  {
+    code: ProcessNotFound,
+    message: "process '\{name}' was not found",
+    path: "process",
+  }
+}
+
+///|
+pub fn record_not_found(path : String) -> EngineError {
+  { code: RecordNotFound, message: "record was not found", path }
+}
+
+///|
+pub fn database_error(message : String, path : String) -> EngineError {
+  { code: DatabaseError, message, path }
+}
+
+///|
 pub fn EngineError::to_json(self : EngineError) -> Json {
   {
     "error": {

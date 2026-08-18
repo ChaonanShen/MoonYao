@@ -30,12 +30,17 @@ loopback fake LLM server，覆盖严格 Connector/Agent/Prompt DSL、普通与�
 Authorization 和请求 JSON、HTTP 500、timeout、三轮持久化、失败 turn 排除、active-turn
 冲突、启动恢复及硬删除。Process tools 测试覆盖 schema meta-validation、运行时参数校验、
 流式 tool arguments 聚合、allowlist、tool transcript、8-round/32-call 边界、Process 错误和
-before/after hooks。后续阶段还必须覆盖 Agent HTTP/SSE 事件和 Web CUI；这些能力实现前
-不得把规划项写成已通过测试。
+before/after hooks。Agent 平台测试覆盖严格 request/query、metadata 脱敏、chat/message
+分页、internal transcript 隔离、active-turn 冲突、SSE escaping/公开事件过滤，以及真实
+TCP 上的 JSON turn、SSE terminal event、CUI 静态资源和 CSP/security headers。
 
 Todo CRUD 是 Agent 工具基础设施的回归路径。HTTP 变更还需启动 `serve ./example/todo`，以
 真实 TCP 请求覆盖 Create/List/Find/Update/Delete、非法 JSON、错误 Content-Type、未知路由
 和 405 `Allow` 响应。
+
+修改 CUI 时还需在浏览器检查桌面与移动视口，完成 Agent/chat 基本流程，并使用类似
+`<img src=x onerror=alert(1)>` 的纯文本 fixture 确认不会生成可执行 DOM。真实 provider 的
+手工流式测试需要设置 API key；自动化测试使用 loopback fake provider，不需要外部网络。
 
 人工验证真实 provider 时，先运行 `migrate`，再设置 DSL 所指向的环境变量并执行
 `agent chat`；不得把 key 写进 fixture、命令日志或仓库文件。

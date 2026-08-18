@@ -10,16 +10,21 @@ test "application loader reads a valid application" {
 }
 
 ///|
-test "application loader resolves the example connector, agent, and prompts" {
-  match load("example/todo") {
-    Ok(application) => {
-      assert_eq(application.agents.length(), 1)
-      assert_eq(application.agents[0].id, "todo")
-      assert_eq(application.agents[0].prompts.length(), 1)
-      assert_eq(application.agents[0].tools.length(), 4)
-      assert_true(application.connector is Some(_))
+test "application loader resolves both release examples" {
+  for path in ["example/todo", "example/todo-agent"] {
+    match load(path) {
+      Ok(application) => {
+        assert_eq(application.models.length(), 1)
+        assert_eq(application.flows.length(), 1)
+        assert_eq(application.apis.length(), 1)
+        assert_eq(application.agents.length(), 1)
+        assert_eq(application.agents[0].id, "todo")
+        assert_eq(application.agents[0].prompts.length(), 1)
+        assert_eq(application.agents[0].tools.length(), 4)
+        assert_true(application.connector is Some(_))
+      }
+      Err(error) => fail(path + ": " + error.message + " at " + error.path)
     }
-    Err(error) => fail(error.message + " at " + error.path)
   }
 }
 

@@ -151,18 +151,18 @@ test "SSE parser handles CRLF, multiple events, usage, and termination" {
 }
 
 ///|
-async test "HTTP connector streams chunks and maps status and timeout errors" {
+async test "HTTP connector accepts text and redacts provider failures" {
   @async.with_task_group() <| group => {
     let server = @http.Server(@socket.Addr::parse("127.0.0.1:0"))
     group.spawn_bg(no_wait=true) <| () => {
       server.run_forever(allow_failure=true) <| ((request, body, connection) => {
         let request_body = body.read_all().text()
+        assert_eq(request.headers.get("authorization"), Some("Bearer test-key"))
+        assert_true(request_body.contains("\"model\":\"fake\""))
+        assert_true(request_body.contains("\"messages\""))
+        assert_true(request_body.contains("\"stream\":true"))
+        assert_true(request_body.contains("\"tools\":["))
         if request.path == "/v1/chat/completions" {
-          assert_eq(
-            request.headers.get("authorization"),
-            Some("Bearer test-key"),
-          )
-          assert_true(request_body.contains("\"model\":\"fake\""))
           connection.send_response(200, "OK", extra_headers={
             "Content-Type": "text/event-stream",
           })
@@ -181,6 +181,26 @@ async test "HTTP connector streams chunks and maps status and timeout errors" {
             "Content-Length": "6",
           })
           connection.write_string("secret")
+          connection.end_response()
+        } else if request.path == "/rate-limit/chat/completions" {
+          connection.send_response(429, "Too Many Requests", extra_headers={
+            "Content-Length": "12",
+          })
+          connection.write_string("retry-secret")
+          connection.end_response()
+        } else if request.path == "/malformed/chat/completions" {
+          connection.send_response(200, "OK", extra_headers={
+            "Content-Type": "text/event-stream",
+          })
+          connection.write_string("data: {not-json}\n\ndata: [DONE]\n\n")
+          connection.end_response()
+        } else if request.path == "/disconnect/chat/completions" {
+          connection.send_response(200, "OK", extra_headers={
+            "Content-Type": "text/event-stream",
+          })
+          connection.write_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+          )
           connection.end_response()
         } else {
           @async.sleep(1100)
@@ -206,7 +226,13 @@ async test "HTTP connector streams chunks and maps status and timeout errors" {
       temperature: 0.0,
       max_tokens: 8,
       stream: true,
-      tools: [],
+      tools: [
+        {
+          name: "list_todos",
+          description: "List Todo items.",
+          input_schema: { "type": "object", "properties": {} },
+        },
+      ],
     }
     let observed : Array[CompletionEvent] = []
     match
@@ -227,6 +253,33 @@ async test "HTTP connector streams chunks and maps status and timeout errors" {
         assert_false(error.message.contains("secret"))
       }
       Ok(_) => fail("expected HTTP error")
+    }
+    let rate_limit_connector : Connector = {
+      ..base,
+      base_url: "http://127.0.0.1:\{server.addr.port()}/rate-limit",
+    }
+    match complete_http(rate_limit_connector, request, "test-key", _ => ()) {
+      Err(error) => {
+        assert_eq(error.code, @errors.LlmError)
+        assert_false(error.message.contains("retry-secret"))
+      }
+      Ok(_) => fail("expected rate-limit error")
+    }
+    let malformed_connector : Connector = {
+      ..base,
+      base_url: "http://127.0.0.1:\{server.addr.port()}/malformed",
+    }
+    match complete_http(malformed_connector, request, "test-key", _ => ()) {
+      Err(error) => assert_eq(error.code, @errors.LlmError)
+      Ok(_) => fail("expected malformed stream error")
+    }
+    let disconnect_connector : Connector = {
+      ..base,
+      base_url: "http://127.0.0.1:\{server.addr.port()}/disconnect",
+    }
+    match complete_http(disconnect_connector, request, "test-key", _ => ()) {
+      Err(error) => assert_eq(error.code, @errors.LlmError)
+      Ok(_) => fail("expected truncated stream error")
     }
     let timeout_connector : Connector = {
       ..base,

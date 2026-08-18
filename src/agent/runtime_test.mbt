@@ -64,6 +64,124 @@ async test "fake client runs three persisted turns and restart-compatible histor
 }
 
 ///|
+async test "twenty sequential turns leave no active turn" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let agent : Agent = {
+    id: "todo",
+    name: "Todo",
+    description: "",
+    connector: "default",
+    options: { temperature: 0.0, max_tokens: 32 },
+    prompts: [{ role: @llm.System, content: "Be concise." }],
+    tools: [],
+    tool_names: [],
+    before_process: "",
+    after_process: "",
+  }
+  let connector : @llm.Connector = {
+    id: "default",
+    connector_type: "openai_chat",
+    base_url: "http://127.0.0.1:1/v1",
+    api_key_env: "TEST_KEY",
+    model: "fake",
+    timeout_ms: 1000,
+  }
+  for index = 1; index <= 20; index = index + 1 {
+    let suffix = index.to_string()
+    let response : FakeResponse = {
+      events: [@llm.Started, @llm.TextDelta("ok"), @llm.Completed],
+      content: "ok",
+      usage: { prompt_tokens: index, completion_tokens: 1 },
+      error: None,
+    }
+    match
+      run_turn(
+        connection,
+        agent,
+        connector,
+        Client::Fake(response),
+        if index == 1 {
+          None
+        } else {
+          Some("smoke-chat")
+        },
+        "turn" + suffix,
+        {
+          chat_id: "smoke-chat",
+          turn_id: "turn" + suffix,
+          user_message_id: "user" + suffix,
+          assistant_message_id: "assistant" + suffix,
+        },
+        index.to_int64(),
+        (_, _) => Err(@errors.internal_error("unexpected invocation", "test")),
+        _ => (),
+      ) {
+      Ok(result) => assert_eq(result.content, "ok")
+      Err(error) => fail(error.message)
+    }
+  }
+  match @conversation.completed_messages(connection, "smoke-chat") {
+    Ok(messages) => assert_eq(messages.length(), 40)
+    Err(error) => fail(error.message)
+  }
+  match @conversation.active_turn_id(connection, "smoke-chat") {
+    Ok(value) => assert_eq(value, "")
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}
+
+///|
+async fn run_concurrent_chat_smoke(suffix : String) -> Unit {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let response : FakeResponse = {
+    events: [@llm.Started, @llm.TextDelta("ok-" + suffix), @llm.Completed],
+    content: "ok-" + suffix,
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+    error: None,
+  }
+  match
+    run_turn(
+      connection,
+      {
+        id: "todo",
+        name: "Todo",
+        description: "",
+        connector: "default",
+        options: { temperature: 0.0, max_tokens: 32 },
+        prompts: [],
+        tools: [],
+        tool_names: [],
+        before_process: "",
+        after_process: "",
+      },
+      tool_test_connector(),
+      Client::Fake(response),
+      None,
+      "hello-" + suffix,
+      tool_test_ids(suffix),
+      1,
+      (_, _) => Err(@errors.internal_error("unexpected invocation", "test")),
+      _ => (),
+    ) {
+    Ok(result) => assert_eq(result.content, "ok-" + suffix)
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}
+
+///|
+async test "different chats can complete concurrently" {
+  @async.with_task_group() <| group => {
+    group.spawn_bg() <| () => { run_concurrent_chat_smoke("a") }
+    group.spawn_bg() <| () => { run_concurrent_chat_smoke("b") }
+  }
+}
+
+///|
 test "history keeps whole recent turns and rejects oversized current input" {
   let stored : Array[@conversation.Message] = [
     {
@@ -302,8 +420,13 @@ fn tool_test_ids(suffix : String) -> Ids {
 
 ///|
 fn fake_tool_response(arguments : String) -> FakeResponse {
+  fake_tool_response_with_id("call-1", arguments)
+}
+
+///|
+fn fake_tool_response_with_id(id : String, arguments : String) -> FakeResponse {
   let call : @llm.ToolCall = {
-    id: "call-1",
+    id,
     name: "create_todo",
     arguments_json: arguments,
   }
@@ -374,11 +497,11 @@ async test "bounded tool loop validates, invokes, and persists transcript" {
 }
 
 ///|
-async test "schema errors are returned to the model without invoking a Process" {
+async test "model can repair invalid tool arguments after a tool error" {
   ignore(@async.now())
   let connection = @sqlite3.Connection::open(":memory:")
   ignore(@conversation.migrate(connection))
-  let mut invoked = false
+  let mut invoked = 0
   match
     run_turn(
       connection,
@@ -386,22 +509,162 @@ async test "schema errors are returned to the model without invoking a Process" 
       tool_test_connector(),
       Client::FakeSequence([
         fake_tool_response("{}"),
-        fake_text_response("Please provide a title."),
+        fake_tool_response_with_id(
+          "call-2", "{\"data\":{\"title\":\"repaired\"}}",
+        ),
+        fake_text_response("Created after correction."),
       ]),
       None,
       "Create one",
       tool_test_ids("2"),
       1,
       (_, _) => {
-        invoked = true
-        Ok(Json::null())
+        invoked = invoked + 1
+        Ok(({ "id": 1, "title": "repaired" } : Json))
       },
       _ => (),
     ) {
-    Ok(result) => assert_eq(result.content, "Please provide a title.")
+    Ok(result) => assert_eq(result.content, "Created after correction.")
     Err(error) => fail(error.message)
   }
-  assert_false(invoked)
+  assert_eq(invoked, 1)
+  connection.close()
+}
+
+///|
+fn multi_tool_agent() -> Agent {
+  {
+    ..tool_test_agent(),
+    tools: [
+      {
+        name: "create_todo",
+        description: "create_todo",
+        process: "models.todo.Create",
+        input_schema: {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "object",
+              "properties": { "title": { "type": "string" } },
+              "required": ["title"],
+              "additionalProperties": false,
+            },
+          },
+          "required": ["data"],
+          "additionalProperties": false,
+        },
+      },
+      {
+        name: "list_todos",
+        description: "list_todos",
+        process: "models.todo.List",
+        input_schema: {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false,
+        },
+      },
+      {
+        name: "complete_todo",
+        description: "complete_todo",
+        process: "models.todo.Update",
+        input_schema: {
+          "type": "object",
+          "properties": {
+            "id": { "type": "integer" },
+            "data": {
+              "type": "object",
+              "properties": { "done": { "type": "boolean" } },
+              "required": ["done"],
+              "additionalProperties": false,
+            },
+          },
+          "required": ["id", "data"],
+          "additionalProperties": false,
+        },
+      },
+      {
+        name: "delete_todo",
+        description: "delete_todo",
+        process: "models.todo.Delete",
+        input_schema: {
+          "type": "object",
+          "properties": { "id": { "type": "integer" } },
+          "required": ["id"],
+          "additionalProperties": false,
+        },
+      },
+    ],
+    tool_names: ["create_todo", "list_todos", "complete_todo", "delete_todo"],
+  }
+}
+
+///|
+async test "multiple Todo tools preserve order and call ids" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let calls : Array[@llm.ToolCall] = [
+    {
+      id: "create-1",
+      name: "create_todo",
+      arguments_json: "{\"data\":{\"title\":\"ship\"}}",
+    },
+    { id: "list-1", name: "list_todos", arguments_json: "{}" },
+    {
+      id: "complete-1",
+      name: "complete_todo",
+      arguments_json: "{\"id\":1,\"data\":{\"done\":true}}",
+    },
+    { id: "delete-1", name: "delete_todo", arguments_json: "{\"id\":1}" },
+  ]
+  let events : Array[@llm.CompletionEvent] = [@llm.Started]
+  for call in calls {
+    events.push(@llm.ToolCallCompleted(call))
+  }
+  events.push(@llm.Completed)
+  let processes : Array[String] = []
+  let completed_ids : Array[String] = []
+  match
+    run_turn(
+      connection,
+      multi_tool_agent(),
+      tool_test_connector(),
+      Client::FakeSequence([
+        {
+          events,
+          content: "",
+          usage: { prompt_tokens: 4, completion_tokens: 1 },
+          error: None,
+        },
+        fake_text_response("Finished all four operations."),
+      ]),
+      None,
+      "Create, list, complete, and delete one Todo",
+      tool_test_ids("multi"),
+      1,
+      (process, _) => {
+        processes.push(process)
+        Ok(({ "ok": true } : Json))
+      },
+      event => {
+        match event {
+          @llm.ToolCompleted(id, _, _, _) => completed_ids.push(id)
+          _ => ()
+        }
+      },
+    ) {
+    Ok(result) => assert_eq(result.content, "Finished all four operations.")
+    Err(error) => fail(error.message)
+  }
+  assert_eq(processes, [
+    "models.todo.Create", "models.todo.List", "models.todo.Update", "models.todo.Delete",
+  ])
+  assert_eq(completed_ids, ["create-1", "list-1", "complete-1", "delete-1"])
+  match @conversation.completed_messages(connection, "chatmulti") {
+    Ok(messages) => assert_eq(messages.length(), 7)
+    Err(error) => fail(error.message)
+  }
   connection.close()
 }
 

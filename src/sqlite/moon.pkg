@@ -1,3 +1,4 @@
 import {
+  "ChaonanShen/MoonYao/errors",
   "moonbit-community/sqlite3",
 }

@@ -108,6 +108,7 @@ test "CRUD validation returns stable errors and leaves the connection usable" {
       "where": { "done": { "eq": false } },
     }),
     registry.run(connection, "models.todo.List", { "limit": -1 }),
+    registry.run(connection, "models.todo.List", { "limit": 1.0e100 }),
     registry.run(connection, "models.todo.Update", { "id": 1, "data": {} }),
   ]
   for result in cases {

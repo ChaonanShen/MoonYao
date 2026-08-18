@@ -32,3 +32,45 @@ test "schema migration is idempotent" {
   statement.finalize()
   connection.close()
 }
+
+///|
+test "schema renders scalar defaults and rejects unsupported NULL semantics" {
+  let defaults = match
+    parse_model(
+      {
+        "name": "sample",
+        "table": "samples",
+        "columns": [
+          { "name": "id", "type": "id" },
+          { "name": "title", "type": "string", "default": "it's ready" },
+        ],
+      },
+      "models/sample.json",
+    ) {
+    Ok(value) => value
+    Err(error) => abort(error.message)
+  }
+  match create_table_sql(defaults) {
+    Ok(sql) => assert_true(sql.contains("DEFAULT 'it''s ready'"))
+    Err(error) => abort(error.message)
+  }
+  let nullable = match
+    parse_model(
+      {
+        "name": "sample",
+        "table": "samples",
+        "columns": [
+          { "name": "id", "type": "id" },
+          { "name": "note", "type": "text", "nullable": true },
+        ],
+      },
+      "models/sample.json",
+    ) {
+    Ok(value) => value
+    Err(error) => abort(error.message)
+  }
+  match create_table_sql(nullable) {
+    Err(error) => assert_eq(error.code, InvalidDsl)
+    Ok(_) => abort("expected unsupported nullable column")
+  }
+}

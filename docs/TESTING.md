@@ -21,10 +21,14 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev check --
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev test --target native
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev build --target native
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- bootstrap
+docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- check ./example/todo
+docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- migrate ./example/todo
 ```
 
 提交 MoonBit、配置、文档或 CI 变更前，至少应完成前四项；修改可执行程序或示例时，还应
-执行最后一项运行验证。Docker 运行产生的 `_build/` 目录已被 Git 忽略，不能提交。
+执行对应的运行验证。测试覆盖内存 SQLite CRUD 与 CLI 的 `check` 无文件副作用、
+`migrate` 创建数据库及 `run` JSON/错误路径。Docker 运行产生的 `_build/` 和示例
+`.db` 文件已被 Git 忽略，不能提交。
 
 ## Docker 镜像缓存策略
 

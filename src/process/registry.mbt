@@ -101,7 +101,14 @@ fn integer_field(
   path : String,
 ) -> Result[Int, @errors.EngineError] {
   match object.get(key) {
-    Some(Number(value, ..)) if value == value.trunc() => Ok(value.to_int())
+    Some(Number(value, ..)) => {
+      let integer = value.to_int()
+      if !value.is_inf() && !value.is_nan() && integer.to_double() == value {
+        Ok(integer)
+      } else {
+        Err(@errors.invalid_argument("expected an integer", path))
+      }
+    }
     Some(_) => Err(@errors.invalid_argument("expected an integer", path))
     None => Err(@errors.invalid_argument("missing required field", path))
   }
@@ -117,9 +124,15 @@ fn bind_value(
 ) -> Result[Unit, @errors.EngineError] {
   try {
     match (column.column_type, value) {
-      (@model.Id | @model.Int, Number(number, ..)) if number == number.trunc() =>
-        statement.bind(index~, number.to_int())
-      (@model.Float, Number(number, ..)) => statement.bind(index~, number)
+      (@model.Id | @model.Int, Number(number, ..)) => {
+        let integer = number.to_int()
+        if number.is_inf() || number.is_nan() || integer.to_double() != number {
+          return Err(@errors.invalid_argument("value has the wrong type", path))
+        }
+        statement.bind(index~, integer)
+      }
+      (@model.Float, Number(number, ..)) if !number.is_inf() && !number.is_nan() =>
+        statement.bind(index~, number)
       (@model.Bool, True) => statement.bind(index~, 1)
       (@model.Bool, False) => statement.bind(index~, 0)
       (@model.String | @model.Text, String(text)) =>

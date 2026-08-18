@@ -238,6 +238,9 @@ test "embedded CUI uses safe DOM rendering and no external build chain" {
       "catch(error){await openChat(state.chatId).catch(()=>{});showError(error)}",
     ),
   )
+  assert_true(agent_js.contains("event.key===\"Enter\"&&!event.shiftKey"))
+  assert_true(agent_js.contains("!event.isComposing"))
+  assert_true(agent_js.contains("requestSubmit()"))
   assert_false(agent_html.contains("https://"))
   assert_false(agent_js.contains("https://"))
 }

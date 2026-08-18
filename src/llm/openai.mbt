@@ -569,12 +569,16 @@ pub async fn complete_http(
     return @async.with_timeout(connector.timeout_ms, () => {
       complete_stream(connector, body, headers, sink)
     }) catch {
+      @async.TimeoutError =>
+        Err(@errors.llm_error("provider request timed out"))
       _ => Err(@errors.llm_error("provider request failed"))
     }
   }
   let (response, response_body) = @async.with_timeout(connector.timeout_ms, () => {
     @http.post(connector.base_url + "/chat/completions", body, headers~)
   }) catch {
+    @async.TimeoutError =>
+      return Err(@errors.llm_error("provider request timed out"))
     _ => return Err(@errors.llm_error("provider request failed"))
   }
   if response.code < 200 || response.code >= 300 {

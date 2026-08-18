@@ -17,6 +17,7 @@ import {
   "moonbitlang/async/socket",
   "moonbitlang/x/fs",
   "moonbitlang/x/sys",
+  "moonbit-community/sqlite3",
 }
 
 pkgtype(kind: "executable")

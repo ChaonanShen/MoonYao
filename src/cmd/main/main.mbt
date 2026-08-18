@@ -60,7 +60,7 @@ fn migrate_command(app_dir : String) -> Result[String, @errors.EngineError] {
   let output : Json = {
     "database": path,
     "migrated": application.models.length(),
-    "conversation_schema": 1,
+    "conversation_schema": 2,
   }
   Ok(output.stringify())
 }
@@ -174,7 +174,7 @@ async fn agent_chat_command(
     Ok(value) => value
     Err(error) => return Err(error)
   }
-  let now = @env.now().to_int()
+  let now = @env.now().reinterpret_as_int64()
   match @conversation.recover_active(connection, now) {
     Err(error) => {
       ignore(@sqlite.close_result(connection))
@@ -317,6 +317,375 @@ fn request_verb(value : @asynchttp.RequestMethod) -> String {
 }
 
 ///|
+fn find_agent(
+  agents : Array[@agent.Agent],
+  id : String,
+) -> Result[@agent.Agent, @errors.EngineError] {
+  for agent in agents {
+    if agent.id == id {
+      return Ok(agent)
+    }
+  }
+  Err(@errors.agent_not_found())
+}
+
+///|
+fn title_for_http(content : String) -> String {
+  let output = StringBuilder::new()
+  let mut count = 0
+  for character in content {
+    if count >= 80 {
+      break
+    }
+    output.write_char(character)
+    count = count + 1
+  }
+  output.to_string()
+}
+
+///|
+fn request_id() -> String {
+  match random_id() {
+    Ok(value) => value
+    Err(_) => "moonyao"
+  }
+}
+
+///|
+fn platform_headers(
+  content_type : String,
+  request_id : String,
+) -> Map[String, String] {
+  {
+    "Content-Type": content_type,
+    "X-Request-Id": request_id,
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-cache",
+  }
+}
+
+///|
+async fn send_platform_response(
+  connection : @asynchttp.ServerConnection,
+  response : @moonhttp.PlatformResponse,
+  id : String,
+) -> Unit {
+  let headers = platform_headers(response.content_type, id)
+  headers.set("Content-Length", response.body.length().to_string())
+  if response.location.length() > 0 {
+    headers.set("Location", response.location)
+  }
+  connection.send_response(
+    response.status,
+    if response.status == 200 || response.status == 201 {
+      "OK"
+    } else if response.status == 302 {
+      "Found"
+    } else {
+      "Error"
+    },
+    extra_headers=headers,
+  )
+  connection.write_string(response.body)
+  connection.end_response()
+}
+
+///|
+async fn send_platform_error(
+  connection : @asynchttp.ServerConnection,
+  error : @errors.EngineError,
+  id : String,
+) -> Unit {
+  let body = error.to_json().stringify()
+  let headers = platform_headers("application/json; charset=utf-8", id)
+  headers.set("Content-Length", body.length().to_string())
+  if error.code == @errors.MethodNotAllowed {
+    headers.set("Allow", error.path)
+  }
+  connection.send_response(
+    @moonhttp.status_code(error),
+    "Error",
+    extra_headers=headers,
+  )
+  connection.write_string(body)
+  connection.end_response()
+}
+
+///|
+async fn run_http_turn(
+  application : @app.Application,
+  database : @sqlite3.Connection,
+  chat_id : String,
+  content : String,
+  stream : Bool,
+  connection : @asynchttp.ServerConnection,
+  id : String,
+) -> Unit {
+  let chat = match @conversation.get_chat(database, chat_id) {
+    Ok(value) => value
+    Err(error) => {
+      send_platform_error(connection, error, id)
+      return
+    }
+  }
+  let selected = match find_agent(application.agents, chat.agent_id) {
+    Ok(value) => value
+    Err(error) => {
+      send_platform_error(connection, error, id)
+      return
+    }
+  }
+  let connector = match application.connector {
+    Some(value) => value
+    None => {
+      send_platform_error(
+        connection,
+        @errors.llm_error("connector is not configured"),
+        id,
+      )
+      return
+    }
+  }
+  let api_key = match @env.get_env_var(connector.api_key_env) {
+    Some(value) if value.length() > 0 => value
+    _ => {
+      send_platform_error(
+        connection,
+        @errors.llm_error("connector API key is not configured"),
+        id,
+      )
+      return
+    }
+  }
+  let fresh_id = fn() -> String { request_id() }
+  let ids : @agent.Ids = {
+    chat_id: fresh_id(),
+    turn_id: fresh_id(),
+    user_message_id: fresh_id(),
+    assistant_message_id: fresh_id(),
+  }
+  if chat.title.length() == 0 {
+    match
+      @conversation.rename_chat(
+        database,
+        chat_id,
+        title_for_http(content),
+        @env.now().reinterpret_as_int64(),
+      ) {
+      Err(error) => {
+        send_platform_error(connection, error, id)
+        return
+      }
+      Ok(_) => ()
+    }
+  }
+  let registry = @process.Registry::with_flows(
+    application.models,
+    application.flows,
+    application.globals,
+  )
+  if !stream {
+    let result = @agent.run_turn(
+      database,
+      selected,
+      connector,
+      @agent.OpenAI(connector, api_key),
+      Some(chat_id),
+      content,
+      ids,
+      @env.now().reinterpret_as_int64(),
+      (process, input) => registry.run(database, process, input),
+      _ => (),
+    )
+    match result {
+      Err(error) => send_platform_error(connection, error, id)
+      Ok(value) => {
+        let current_chat = match @conversation.get_chat(database, chat_id) {
+          Ok(item) => item
+          Err(error) => {
+            send_platform_error(connection, error, id)
+            return
+          }
+        }
+        let turn = match @conversation.get_turn(database, value.turn_id) {
+          Ok(item) => item
+          Err(error) => {
+            send_platform_error(connection, error, id)
+            return
+          }
+        }
+        let body = @moonhttp.success({
+          "chat": @moonhttp.chat_json(current_chat, ""),
+          "turn": @moonhttp.turn_json(turn),
+          "message": {
+            "id": ids.assistant_message_id,
+            "chat_id": chat_id,
+            "turn_id": value.turn_id,
+            "role": "assistant",
+            "kind": "text",
+            "content": value.content,
+            "status": "completed",
+          },
+          "usage": {
+            "prompt_tokens": value.usage.prompt_tokens,
+            "completion_tokens": value.usage.completion_tokens,
+          },
+        }).stringify()
+        send_platform_response(
+          connection,
+          {
+            status: 200,
+            content_type: "application/json; charset=utf-8",
+            body,
+            location: "",
+          },
+          id,
+        )
+      }
+    }
+    return
+  }
+  let headers = platform_headers("text/event-stream; charset=utf-8", id)
+  headers.set("Connection", "keep-alive")
+  headers.set("X-Accel-Buffering", "no")
+  connection.send_response(200, "OK", extra_headers=headers)
+  connection.flush()
+  let frames : Array[String] = []
+  let mut sequence = 1
+  frames.push(
+    @moonhttp.sse_frame(sequence, "turn.started", {
+      "sequence": sequence,
+      "chat_id": chat_id,
+      "turn_id": ids.turn_id,
+    }),
+  )
+  let mut terminal = false
+  let mut done = false
+  let mut open = true
+  @async.with_task_group() <| group => {
+    group.spawn_bg(allow_failure=true) <| () => {
+      let mut index = 0
+      let mut last_write = @env.now()
+      while open && (!done || index < frames.length()) {
+        if index < frames.length() {
+          try {
+            while index < frames.length() {
+              connection.write_string(frames[index])
+              index = index + 1
+            }
+            connection.flush()
+            last_write = @env.now()
+          } catch {
+            _ => open = false
+          }
+        } else {
+          @async.sleep(25)
+          if @env.now() - last_write >= 15000 {
+            try {
+              connection.write_string(@moonhttp.heartbeat())
+              connection.flush()
+              last_write = @env.now()
+            } catch {
+              _ => open = false
+            }
+          }
+        }
+      }
+    }
+    let result = @agent.run_turn(
+      database,
+      selected,
+      connector,
+      @agent.OpenAI(connector, api_key),
+      Some(chat_id),
+      content,
+      ids,
+      @env.now().reinterpret_as_int64(),
+      (process, input) => registry.run(database, process, input),
+      event => {
+        match
+          @moonhttp.public_event(
+            event,
+            sequence + 1,
+            chat_id,
+            ids.turn_id,
+            ids.assistant_message_id,
+          ) {
+          Some((name, data)) => {
+            sequence = sequence + 1
+            if name == "turn.failed" {
+              terminal = true
+            }
+            frames.push(@moonhttp.sse_frame(sequence, name, data))
+          }
+          None => ()
+        }
+      },
+    )
+    match result {
+      Ok(value) => {
+        sequence = sequence + 1
+        frames.push(
+          @moonhttp.sse_frame(sequence, "message.completed", {
+            "sequence": sequence,
+            "chat_id": chat_id,
+            "turn_id": value.turn_id,
+            "message": {
+              "id": ids.assistant_message_id,
+              "role": "assistant",
+              "kind": "text",
+              "content": value.content,
+              "status": "completed",
+            },
+          }),
+        )
+        sequence = sequence + 1
+        let turn = match @conversation.get_turn(database, value.turn_id) {
+          Ok(item) => @moonhttp.turn_json(item)
+          Err(_) =>
+            { "id": value.turn_id, "chat_id": chat_id, "status": "completed" }
+        }
+        frames.push(
+          @moonhttp.sse_frame(sequence, "turn.completed", {
+            "sequence": sequence,
+            "chat_id": chat_id,
+            "turn_id": value.turn_id,
+            "turn": turn,
+            "usage": {
+              "prompt_tokens": value.usage.prompt_tokens,
+              "completion_tokens": value.usage.completion_tokens,
+            },
+          }),
+        )
+      }
+      Err(error) if !terminal => {
+        sequence = sequence + 1
+        frames.push(
+          @moonhttp.sse_frame(sequence, "turn.failed", {
+            "sequence": sequence,
+            "chat_id": chat_id,
+            "turn_id": ids.turn_id,
+            "error": {
+              "code": error.code.as_string(),
+              "message": error.message,
+            },
+          }),
+        )
+      }
+      Err(_) => ()
+    }
+    done = true
+  }
+  if open {
+    connection.end_response() catch {
+      _ => ()
+    }
+  }
+}
+
+///|
 async fn serve_command(app_dir : String) -> Unit {
   let application = match @app.load(app_dir) {
     Ok(value) => value
@@ -375,51 +744,110 @@ async fn serve_command(app_dir : String) -> Unit {
       Ok(value) => value
       Err(error) => abort(error.message)
     }
-    let registry = @process.Registry::with_flows(
-      application.models,
-      application.flows,
-      application.globals,
-    )
-    let result = match (parsed, query) {
+    let id = request_id()
+    let platform = match (parsed, query) {
       (Err(error), _) | (_, Err(error)) => Err(error)
       (Ok(value), Ok(query_values)) =>
-        @moonhttp.invoke(routes, registry, database, {
-          verb: request_verb(request.meth),
-          path: path_parts[0],
-          body: value,
-          query: query_values,
-          headers: request.headers,
-        })
-    }
-    ignore(@sqlite.close_result(database))
-    match result {
-      Ok(output) => {
-        let response = output.stringify()
-        connection.send_response(200, "OK", extra_headers={
-          "Content-Type": "application/json; charset=utf-8",
-          "Content-Length": response.length().to_string(),
-          "X-Request-Id": "moonyao",
-        })
-        connection.write_string(response)
-        connection.end_response()
-      }
-      Err(error) => {
-        let response = error.to_json().stringify()
-        let response_headers = {
-          "Content-Type": "application/json; charset=utf-8",
-          "Content-Length": response.length().to_string(),
-          "X-Request-Id": "moonyao",
-        }
-        if error.code == @errors.MethodNotAllowed {
-          response_headers.set("Allow", error.path)
-        }
-        connection.send_response(
-          @moonhttp.status_for(error),
-          "Error",
-          extra_headers=response_headers,
+        @moonhttp.dispatch_platform(
+          application.agents,
+          database,
+          request_verb(request.meth),
+          path_parts[0],
+          value,
+          query_values,
+          request_id(),
+          @env.now().reinterpret_as_int64(),
         )
-        connection.write_string(response)
-        connection.end_response()
+    }
+    match platform {
+      Err(error) => {
+        ignore(@sqlite.close_result(database))
+        if path_parts[0] == "/v1" ||
+          path_parts[0].has_prefix("/v1/") ||
+          path_parts[0] == "/agent" ||
+          path_parts[0].has_prefix("/agent/") {
+          send_platform_error(connection, error, id)
+        } else {
+          let response = error.to_json().stringify()
+          let response_headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": response.length().to_string(),
+            "X-Request-Id": id,
+          }
+          if error.code == @errors.MethodNotAllowed {
+            response_headers.set("Allow", error.path)
+          }
+          connection.send_response(
+            @moonhttp.status_for(error),
+            "Error",
+            extra_headers=response_headers,
+          )
+          connection.write_string(response)
+          connection.end_response()
+        }
+      }
+      Ok(Some(@moonhttp.Response(response))) => {
+        ignore(@sqlite.close_result(database))
+        send_platform_response(connection, response, id)
+      }
+      Ok(Some(@moonhttp.Turn(chat_id, content))) => {
+        let stream = match request.headers.get("accept") {
+          Some(value) => value.contains("text/event-stream")
+          None => false
+        }
+        run_http_turn(
+          application, database, chat_id, content, stream, connection, id,
+        )
+        ignore(@sqlite.close_result(database))
+      }
+      Ok(None) => {
+        let registry = @process.Registry::with_flows(
+          application.models,
+          application.flows,
+          application.globals,
+        )
+        let result = match (parsed, query) {
+          (Ok(value), Ok(query_values)) =>
+            @moonhttp.invoke(routes, registry, database, {
+              verb: request_verb(request.meth),
+              path: path_parts[0],
+              body: value,
+              query: query_values,
+              headers: request.headers,
+            })
+          _ => abort("validated request was unavailable")
+        }
+        ignore(@sqlite.close_result(database))
+        match result {
+          Ok(output) => {
+            let response = output.stringify()
+            connection.send_response(200, "OK", extra_headers={
+              "Content-Type": "application/json; charset=utf-8",
+              "Content-Length": response.length().to_string(),
+              "X-Request-Id": id,
+            })
+            connection.write_string(response)
+            connection.end_response()
+          }
+          Err(error) => {
+            let response = error.to_json().stringify()
+            let response_headers = {
+              "Content-Type": "application/json; charset=utf-8",
+              "Content-Length": response.length().to_string(),
+              "X-Request-Id": id,
+            }
+            if error.code == @errors.MethodNotAllowed {
+              response_headers.set("Allow", error.path)
+            }
+            connection.send_response(
+              @moonhttp.status_for(error),
+              "Error",
+              extra_headers=response_headers,
+            )
+            connection.write_string(response)
+            connection.end_response()
+          }
+        }
       }
     }
   })

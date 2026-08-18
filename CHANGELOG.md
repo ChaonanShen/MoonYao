@@ -4,6 +4,11 @@
 
 ## 未发布
 
+### 变更
+
+- 将项目主目标明确为面向 Yao Agent 公开行为、DSL 和执行模型的 MoonBit clean-room 移植；
+  Model、Process、Flow、SQLite 与 HTTP 定位为 Agent 工具的最小支撑基础。
+
 ### 新增
 
 - MoonBit Native 工程骨架、可执行程序、单元测试和持续集成。

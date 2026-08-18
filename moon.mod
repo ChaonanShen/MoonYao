@@ -8,13 +8,13 @@ repository = "https://github.com/ChaonanShen/MoonYao"
 
 license = "Apache-2.0"
 
-keywords = [ "moonbit", "sqlite", "dsl", "application-engine" ]
+keywords = [ "moonbit", "agent", "llm", "dsl" ]
 
 preferred_target = "native"
 
 source = "src"
 
-description = "A small declarative application engine for MoonBit Native."
+description = "A MoonBit Native clean-room port of the Yao Agent runtime and DSL."
 
 import {
   "moonbitlang/x@0.4.50",

@@ -25,19 +25,23 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- migrate ./example/todo
 ```
 
-HTTP 变更还需启动 `serve ./example/todo`，以真实 TCP 请求覆盖 Todo 的 Create/List/Find/
-Update/Delete、非法 JSON、错误 Content-Type、未知路由和 405 `Allow` 响应。
+Agent 是主要验收路径，测试不需要真实 provider 或 API key。测试套件使用内存 SQLite 和
+loopback fake LLM server，覆盖严格 Connector/Agent/Prompt DSL、普通与分块 SSE 响应、
+Authorization 和请求 JSON、HTTP 500、timeout、三轮持久化、失败 turn 排除、active-turn
+冲突、启动恢复及硬删除。后续阶段还必须覆盖 Process tools、hooks、有界 tool loop、Agent
+HTTP/SSE 事件和 Web CUI；这些能力实现前不得把规划项写成已通过测试。
 
-Agent 测试不需要真实 provider 或 API key。测试套件使用内存 SQLite 和 loopback fake LLM
-server，覆盖严格 Connector/Agent/Prompt DSL、普通与分块 SSE 响应、Authorization 和请求
-JSON、HTTP 500、timeout、三轮持久化、失败 turn 排除、active-turn 冲突、启动恢复及硬删除。
+Todo CRUD 是 Agent 工具基础设施的回归路径。HTTP 变更还需启动 `serve ./example/todo`，以
+真实 TCP 请求覆盖 Create/List/Find/Update/Delete、非法 JSON、错误 Content-Type、未知路由
+和 405 `Allow` 响应。
+
 人工验证真实 provider 时，先运行 `migrate`，再设置 DSL 所指向的环境变量并执行
 `agent chat`；不得把 key 写进 fixture、命令日志或仓库文件。
 
 提交 MoonBit、配置、文档或 CI 变更前，至少应完成前四项；修改可执行程序或示例时，还应
-执行对应的运行验证。测试覆盖内存 SQLite CRUD 与 CLI 的 `check` 无文件副作用、
-`migrate` 创建数据库及会话 schema、`run` JSON/错误路径和 Agent fake-client 主链路。Docker 运行产生的 `_build/` 和示例
-`.db` 文件已被 Git 忽略，不能提交。
+执行对应的运行验证。测试覆盖 Agent fake-client 主链路、CLI `check` 无文件副作用、
+`migrate` 创建会话及模型 schema、`run` JSON/错误路径和内存 SQLite CRUD。Docker 运行
+产生的 `_build/` 和示例 `.db` 文件已被 Git 忽略，不能提交。
 
 ## Docker 镜像缓存策略
 

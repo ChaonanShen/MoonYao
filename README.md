@@ -1,28 +1,33 @@
 # MoonYao Core
 
-MoonYao Core 是一个使用 MoonBit Native 实现的声明式轻量应用引擎，参考
-[Yao App Engine](https://github.com/YaoApp/yao) 的公开概念和使用体验。项目采用
-独立的 clean-room 设计与实现，不复制或逐行翻译 Yao 源码。
+MoonYao Core 是一个面向 [Yao Agent](https://yaoapps.com/docs/tutorials/en-us/agent/yao-agent)
+公开行为、DSL 和执行模型的 MoonBit Native clean-room 移植。项目采用独立设计与实现，
+不复制或逐行翻译 Yao 源码，也不以兼容完整 Yao App Engine 为目标。
 
-第一版只做一条边界清晰的完整链路：
+第一版聚焦一条边界清晰的 Agent 完整链路：
 
 ```text
-JSON DSL -> 应用加载 -> SQLite CRUD / Process -> 顺序 Flow -> HTTP API
-         -> Agent/Prompt -> 持久化会话 -> OpenAI-compatible streaming chat
+Agent/Prompt DSL -> SQLite 持久化会话 -> Agent Runtime
+                                           |          |
+                          Process 工具基础设施       OpenAI-compatible streaming chat
+                    (Model / Flow / SQLite / HTTP)
 ```
+
+Model、Process、Flow、SQLite 和 HTTP 不是独立的通用应用引擎产品线，而是让 Agent 能够
+安全调用本地工具、持久化状态并通过 API 交互的最小基础设施。
 
 ## 当前状态
 
-仓库当前已完成 JSON 应用/模型/API/Agent/Connector/Prompt DSL 校验、SQLite schema 与会话
-迁移、模型 CRUD Process、严格值绑定与顺序 Flow、异步 HTTP/1.1 Todo CRUD API，以及一个
-支持流式 OpenAI-compatible Chat Completions 的持久化文本 Agent 主链路。
+仓库当前已完成严格 Agent/Connector/Prompt DSL、SQLite 持久化 chat/turn/message、
+OpenAI-compatible 普通及流式 Chat Completions 和 `agent chat` 多轮会话。作为 Agent 工具
+基础，仓库也已完成 Model/Process/Flow DSL、SQLite CRUD 和异步 HTTP/1.1 Todo API。
 
 ## 支持范围
 
-第一版仅支持 MoonBit Native、SQLite 和严格 JSON DSL，用于声明模型、顺序 Flow、固定
-HTTP 路由及单一文本 Agent connector。不实现 Yao 的 JavaScript 运行时、插件、UI、
-OpenAPI、认证、多租户、多数据库、Join、复杂 Flow 控制、Agent tools、RAG、附件或
-multi-agent。
+第一版仅支持 MoonBit Native、SQLite、严格 JSON DSL 和单一 OpenAI-compatible 文本
+connector。当前尚未实现 Process tools、hooks、Agent HTTP/SSE、Web CUI、RAG、附件或
+multi-agent；也不实现 Yao 的 JavaScript 运行时、插件、完整应用引擎、OpenAPI、认证、
+多租户、多数据库、Join 或复杂 Flow 控制。
 
 ## 开发环境
 
@@ -64,38 +69,7 @@ moon run src/cmd/main -- bootstrap
 MoonYao Core bootstrap: Native runtime is ready.
 ```
 
-## Todo 快速开始
-
-仓库中的 `example/todo` 可以直接迁移并调用 Process：
-
-```bash
-moon run src/cmd/main -- check ./example/todo
-moon run src/cmd/main -- migrate ./example/todo
-moon run src/cmd/main -- run ./example/todo models.todo.Create '{"data":{"title":"learn MoonBit"}}'
-moon run src/cmd/main -- run ./example/todo models.todo.List '{"where":{"done":false},"limit":20,"offset":0}'
-moon run src/cmd/main -- run ./example/todo models.todo.Update '{"id":1,"data":{"done":true}}'
-moon run src/cmd/main -- run ./example/todo models.todo.Find '{"id":1}'
-moon run src/cmd/main -- run ./example/todo models.todo.Delete '{"id":1}'
-moon run src/cmd/main -- run ./example/todo flows.create_todo '{"body":{"title":"learn Flow"}}'
-moon run src/cmd/main -- serve ./example/todo
-```
-
-服务缺省监听 `127.0.0.1:8080`，可在 `app.json` 通过 `listen` 设置另一个 IP literal 和
-端口。启动前必须先运行 `migrate`。例如：
-
-```bash
-curl -X POST http://127.0.0.1:8080/todos -H 'Content-Type: application/json' -d '{"title":"HTTP Todo"}'
-curl http://127.0.0.1:8080/todos
-curl http://127.0.0.1:8080/todos/1
-curl -X PATCH http://127.0.0.1:8080/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
-curl -X DELETE http://127.0.0.1:8080/todos/1
-```
-
-API 文件位于 `apis/*.json`。支持 GET/POST/PATCH/DELETE、`:param`、query、headers 和
-JSON body。当前服务仅适合 loopback 本地开发，没有认证、TLS server、CORS、上传或
-静态文件服务；JSON body 上限为 1 MiB，query 最多 100 项。
-
-## Agent 对话
+## Agent 快速开始
 
 `example/todo` 包含一个 `todo` Agent。Connector 固定放在
 `connectors/default.json`，API key 只填写环境变量名，不写入 DSL：
@@ -126,10 +100,41 @@ moon run src/cmd/main -- agent chat ./example/todo todo "Which one should I do f
 应用 SQLite 数据库中；进程重启后可以继续同一个 chat。历史只回放成功的完整 turn，并按
 100 条消息和 256 KiB UTF-8 内容上限从最旧完整 turn 开始裁剪。
 
-P5 只支持 `system`/`user`/`assistant` 文本和一个 `default` connector，不支持 tool call、
+当前只支持 `system`/`user`/`assistant` 文本和一个 `default` connector，不支持 tool call、
 hook、图片、附件、provider fallback 或供应商 conversation ID。`check` 不读取 API key、
 不联网也不访问数据库；key 仅在发起模型请求时读取，Authorization、完整 prompt 和响应
 正文不会写入错误信息。
+
+## Todo 工具基础示例
+
+Todo CRUD 用来验证未来 Agent tools 复用的 Model、Process、Flow 和 HTTP 基础设施：
+
+```bash
+moon run src/cmd/main -- check ./example/todo
+moon run src/cmd/main -- migrate ./example/todo
+moon run src/cmd/main -- run ./example/todo models.todo.Create '{"data":{"title":"learn MoonBit"}}'
+moon run src/cmd/main -- run ./example/todo models.todo.List '{"where":{"done":false},"limit":20,"offset":0}'
+moon run src/cmd/main -- run ./example/todo models.todo.Update '{"id":1,"data":{"done":true}}'
+moon run src/cmd/main -- run ./example/todo models.todo.Find '{"id":1}'
+moon run src/cmd/main -- run ./example/todo models.todo.Delete '{"id":1}'
+moon run src/cmd/main -- run ./example/todo flows.create_todo '{"body":{"title":"learn Flow"}}'
+moon run src/cmd/main -- serve ./example/todo
+```
+
+服务缺省监听 `127.0.0.1:8080`，可在 `app.json` 通过 `listen` 设置另一个 IP literal 和
+端口。启动前必须先运行 `migrate`。例如：
+
+```bash
+curl -X POST http://127.0.0.1:8080/todos -H 'Content-Type: application/json' -d '{"title":"HTTP Todo"}'
+curl http://127.0.0.1:8080/todos
+curl http://127.0.0.1:8080/todos/1
+curl -X PATCH http://127.0.0.1:8080/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
+curl -X DELETE http://127.0.0.1:8080/todos/1
+```
+
+API 文件位于 `apis/*.json`。支持 GET/POST/PATCH/DELETE、`:param`、query、headers 和
+JSON body。当前服务仅适合 loopback 本地开发，没有认证、TLS server、CORS、上传或
+静态文件服务；JSON body 上限为 1 MiB，query 最多 100 项。
 
 `check` 只校验 DSL，不创建数据库；`migrate` 幂等创建模型表和内部会话表；`run` 接受一个
 Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构化 JSON 错误并以非零状态
@@ -142,12 +147,11 @@ Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构�
 
 ## 实现计划
 
-1. 定义结构化错误和单一 JSON 值的 Process 协议。
-2. 在无副作用条件下加载并校验 Model DSL。
-3. 实现 SQLite Schema 创建及全部使用参数绑定的 CRUD Process。
-4. 实现输入/结果绑定与顺序 Flow。（已完成）
-5. 实现 HTTP 路由、CLI 子命令与 Todo 端到端示例。（已完成）
-6. 实现严格 Agent DSL、单一流式 connector 与持久化多轮会话。（已完成）
+1. 建立 Agent 工具所需的 Process、Model/SQLite、Flow 与 HTTP 基础。（已完成）
+2. 实现严格 Agent DSL、单一流式 connector 与持久化多轮会话。（已完成）
+3. 实现 Process tools、有限 hooks 与有界 Agent loop。
+4. 实现 Agent HTTP/SSE API 与最小本地 Web CUI。
+5. 完成 Agent 主链路的离线验收、文档和发布。
 
 每个有效功能均须先建立 GitHub Issue，并通过聚焦的分支与 Pull Request 实现。
 
@@ -157,8 +161,8 @@ MoonYao Core 使用 [Apache License 2.0](LICENSE)，它是 OSI 认可的开源�
 所有外部来源、依赖和许可证记录见 [docs/PROVENANCE.md](docs/PROVENANCE.md)。
 
 Yao 当前仓库的许可证在标准 Apache-2.0 之外还有附加条款；该许可证适用于 Yao，
-不改变 MoonYao 的许可证。贡献者不得复制 Yao 源码，并应在引入任何外部素材前完成
-来源与许可证记录。
+不改变 MoonYao 的许可证。MoonYao 只依据公开文档、接口与可观察行为编写规格并独立实现。
+贡献者不得复制 Yao 源码，并应在引入任何外部素材前完成来源与许可证记录。
 
 ## 贡献规范
 

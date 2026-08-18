@@ -3,6 +3,7 @@ pub(all) enum Role {
   System
   User
   Assistant
+  Tool
 } derive(Eq, Debug)
 
 ///|
@@ -18,7 +19,22 @@ pub(all) struct ChatRequest {
   temperature : Double
   max_tokens : Int
   stream : Bool
+  tools : Array[ToolDefinition]
 } derive(Debug)
+
+///|
+pub(all) struct ToolDefinition {
+  name : String
+  description : String
+  input_schema : Json
+} derive(Eq, Debug)
+
+///|
+pub(all) struct ToolCall {
+  id : String
+  name : String
+  arguments_json : String
+} derive(Eq, Debug)
 
 ///|
 pub(all) struct Usage {
@@ -33,6 +49,13 @@ pub(all) enum CompletionEvent {
   Usage(Usage)
   Completed
   Failed(String)
+  ToolCallStarted(Int, String, String)
+  ToolArgumentsDelta(Int, String)
+  ToolCallCompleted(ToolCall)
+  ToolStarted(String, String)
+  ToolCompleted(String, String, Bool, String)
+  HookStarted(String)
+  HookCompleted(String)
 } derive(Eq, Debug)
 
 ///|

@@ -55,6 +55,7 @@ test "non-stream requests omit stream-only options" {
     temperature: 0.0,
     max_tokens: 8,
     stream: false,
+    tools: [],
   }
   guard request_json(request) is Object(object) else {
     fail("expected request object")
@@ -63,12 +64,64 @@ test "non-stream requests omit stream-only options" {
 }
 
 ///|
+test "requests encode tool definitions and provider-neutral tool messages" {
+  let request : ChatRequest = {
+    model: "fake",
+    messages: [
+      {
+        role: Assistant,
+        content: "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"create_todo\",\"arguments\":\"{}\"}}]}",
+      },
+      {
+        role: Tool,
+        content: "{\"tool_call_id\":\"call-1\",\"name\":\"create_todo\",\"content\":\"{\\\"id\\\":1}\"}",
+      },
+    ],
+    temperature: 0.0,
+    max_tokens: 8,
+    stream: true,
+    tools: [
+      {
+        name: "create_todo",
+        description: "Create.",
+        input_schema: { "type": "object", "properties": {} },
+      },
+    ],
+  }
+  let encoded = request_json(request).stringify()
+  assert_true(encoded.contains("tool_call_id"))
+  assert_true(encoded.contains("parameters"))
+}
+
+///|
+test "SSE parser assembles fragmented tool-call arguments" {
+  let source = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"create_todo\",\"arguments\":\"{\\\"data\\\":\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"title\\\":\\\"ship\\\"}}\"}}]}}]}\n\ndata: [DONE]\n\n"
+  match parse_sse(source) {
+    Ok((events, content, _)) => {
+      assert_eq(content, "")
+      let mut found = false
+      for event in events {
+        match event {
+          ToolCallCompleted(call) => {
+            found = true
+            assert_eq(call.arguments_json, "{\"data\":{\"title\":\"ship\"}}")
+          }
+          _ => ()
+        }
+      }
+      assert_true(found)
+    }
+    Err(error) => fail(error.message)
+  }
+}
+
+///|
 test "completion parser accepts text and rejects empty choices" {
   match
     parse_completion(
       "{\"choices\":[{\"message\":{\"content\":\"hello\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}",
     ) {
-    Ok((content, usage)) => {
+    Ok((_, content, usage)) => {
       assert_eq(content, "hello")
       assert_eq(usage.prompt_tokens, 2)
     }
@@ -153,6 +206,7 @@ async test "HTTP connector streams chunks and maps status and timeout errors" {
       temperature: 0.0,
       max_tokens: 8,
       stream: true,
+      tools: [],
     }
     let observed : Array[CompletionEvent] = []
     match

@@ -4,15 +4,42 @@ fn role_string(role : Role) -> String {
     System => "system"
     User => "user"
     Assistant => "assistant"
+    Tool => "tool"
   }
 }
 
 ///|
+fn wire_message(message : ChatMessage) -> Json {
+  if message.role == Assistant {
+    let parsed = @json.parse(message.content) catch { _ => Json::null() }
+    guard parsed is Object(object) else {
+      return { "role": "assistant", "content": message.content }
+    }
+    match object.get("tool_calls") {
+      Some(Array(_)) => return Json::object(object)
+      _ => ()
+    }
+  }
+  if message.role == Tool {
+    let parsed = @json.parse(message.content) catch { _ => Json::null() }
+    guard parsed is Object(object) else {
+      return { "role": "tool", "content": message.content }
+    }
+    let result : Map[String, Json] = { "role": "tool" }
+    for key in ["tool_call_id", "name", "content"] {
+      match object.get(key) {
+        Some(value) => result.set(key, value)
+        None => ()
+      }
+    }
+    return Json::object(result)
+  }
+  { "role": role_string(message.role), "content": message.content }
+}
+
+///|
 pub fn request_json(request : ChatRequest) -> Json {
-  let messages : Array[Json] = request.messages.map(message => {
-    "role": role_string(message.role),
-    "content": message.content,
-  })
+  let messages : Array[Json] = request.messages.map(wire_message)
   let result : Map[String, Json] = {
     "model": request.model,
     "messages": messages,
@@ -23,7 +50,42 @@ pub fn request_json(request : ChatRequest) -> Json {
   if request.stream {
     result.set("stream_options", { "include_usage": true })
   }
+  if !request.tools.is_empty() {
+    let tools : Array[Json] = []
+    for tool in request.tools {
+      tools.push({
+        "type": "function",
+        "function": Json::object({
+          "name": Json::string(tool.name),
+          "description": Json::string(tool.description),
+          "parameters": tool.input_schema,
+        }),
+      })
+    }
+    result.set("tools", Json::array(tools))
+  }
   Json::object(result)
+}
+
+///|
+fn integer(value : Json) -> Int? {
+  match value {
+    Number(number, ..) if number.to_int().to_double() == number =>
+      Some(number.to_int())
+    _ => None
+  }
+}
+
+///|
+fn complete_tool_call(value : Json) -> ToolCall? {
+  guard value is Object(object) else { return None }
+  guard object.get("id") is Some(String(id)) else { return None }
+  guard object.get("function") is Some(Object(function)) else { return None }
+  guard function.get("name") is Some(String(name)) else { return None }
+  guard function.get("arguments") is Some(String(arguments)) else {
+    return None
+  }
+  Some({ id, name, arguments_json: arguments })
 }
 
 ///|
@@ -43,26 +105,49 @@ fn usage_from(value : Json) -> Usage? {
 ///|
 pub fn parse_completion(
   source : String,
-) -> Result[(String, Usage), @errors.EngineError] {
+) -> Result[(Array[CompletionEvent], String, Usage), @errors.EngineError] {
   let value = @json.parse(source) catch {
     _ => return Err(@errors.llm_error("provider returned invalid JSON"))
   }
   guard value is Object(object) else {
     return Err(@errors.llm_error("provider returned invalid completion"))
   }
+  let events : Array[CompletionEvent] = [Started]
   let content = match object.get("choices") {
     Some(Array(choices)) if !choices.is_empty() =>
       match choices[0] {
         Object(choice) =>
           match choice.get("message") {
-            Some(Object(message)) =>
-              match message.get("content") {
-                Some(String(text)) if text.length() > 0 => text
+            Some(Object(message)) => {
+              let text = match message.get("content") {
+                Some(String(value)) => value
+                None | Some(Null) => ""
                 _ =>
                   return Err(
                     @errors.llm_error("provider returned non-text content"),
                   )
               }
+              match message.get("tool_calls") {
+                Some(Array(calls)) =>
+                  for call in calls {
+                    match complete_tool_call(call) {
+                      Some(value) => events.push(ToolCallCompleted(value))
+                      None =>
+                        return Err(
+                          @errors.llm_error(
+                            "provider returned invalid tool call",
+                          ),
+                        )
+                    }
+                  }
+                None => ()
+                _ =>
+                  return Err(
+                    @errors.llm_error("provider returned invalid tool calls"),
+                  )
+              }
+              text
+            }
             _ =>
               return Err(
                 @errors.llm_error("provider returned invalid completion"),
@@ -81,7 +166,16 @@ pub fn parse_completion(
         None => return Err(@errors.llm_error("provider returned invalid usage"))
       }
   }
-  Ok((content, usage))
+  if content.length() > 0 {
+    events.push(TextDelta(content))
+  }
+  if content.length() == 0 &&
+    !events.any(event => event is ToolCallCompleted(_)) {
+    return Err(@errors.llm_error("provider returned empty completion"))
+  }
+  events.push(Usage(usage))
+  events.push(Completed)
+  Ok((events, content, usage))
 }
 
 ///|
@@ -134,7 +228,140 @@ fn parse_stream_json(
         @errors.llm_error("provider returned malformed stream choices"),
       )
   }
+  match object.get("choices") {
+    Some(Array(choices)) =>
+      for choice in choices {
+        guard choice is Object(choice_object) else { continue }
+        guard choice_object.get("delta") is Some(Object(delta)) else {
+          continue
+        }
+        match delta.get("tool_calls") {
+          Some(Array(calls)) =>
+            for call in calls {
+              guard call is Object(call_object) else {
+                return Err(
+                  @errors.llm_error("provider returned malformed tool delta"),
+                )
+              }
+              let index = match call_object.get("index") {
+                Some(value) =>
+                  match integer(value) {
+                    Some(v) if v >= 0 && v < 32 => v
+                    _ =>
+                      return Err(
+                        @errors.llm_error(
+                          "provider returned invalid tool index",
+                        ),
+                      )
+                  }
+                None =>
+                  return Err(@errors.llm_error("provider omitted tool index"))
+              }
+              match (call_object.get("id"), call_object.get("function")) {
+                (Some(String(id)), Some(Object(function))) =>
+                  match function.get("name") {
+                    Some(String(name)) if id.length() > 0 && name.length() > 0 =>
+                      events.push(ToolCallStarted(index, id, name))
+                    _ =>
+                      return Err(
+                        @errors.llm_error(
+                          "provider returned invalid tool start",
+                        ),
+                      )
+                  }
+                (None, Some(Object(_))) | (None, None) => ()
+                _ =>
+                  return Err(
+                    @errors.llm_error("provider returned malformed tool delta"),
+                  )
+              }
+              match call_object.get("function") {
+                Some(Object(function)) =>
+                  match function.get("arguments") {
+                    Some(String(arguments)) if arguments.length() > 0 =>
+                      events.push(ToolArgumentsDelta(index, arguments))
+                    None => ()
+                    _ =>
+                      return Err(
+                        @errors.llm_error(
+                          "provider returned invalid tool arguments",
+                        ),
+                      )
+                  }
+                None => ()
+                _ =>
+                  return Err(
+                    @errors.llm_error(
+                      "provider returned malformed tool function",
+                    ),
+                  )
+              }
+            }
+          None => ()
+          _ =>
+            return Err(
+              @errors.llm_error("provider returned invalid tool calls"),
+            )
+        }
+      }
+    _ => ()
+  }
   Ok(events)
+}
+
+///|
+priv struct ToolBuffer {
+  id : String
+  name : String
+  arguments : StringBuilder
+  started : Bool
+}
+
+///|
+fn assemble_tool_calls(
+  events : Array[CompletionEvent],
+) -> Result[Array[ToolCall], @errors.EngineError] {
+  let buffers : Array[ToolBuffer] = []
+  for event in events {
+    match event {
+      ToolCallStarted(index, id, name) => {
+        if index > buffers.length() {
+          return Err(@errors.llm_error("provider skipped a tool-call index"))
+        }
+        if index == buffers.length() {
+          buffers.push({
+            id,
+            name,
+            arguments: StringBuilder::new(),
+            started: true,
+          })
+        } else if buffers[index].started {
+          return Err(@errors.llm_error("provider repeated a tool-call start"))
+        }
+      }
+      ToolArgumentsDelta(index, delta) => {
+        if index >= buffers.length() || !buffers[index].started {
+          return Err(
+            @errors.llm_error("provider sent arguments before tool start"),
+          )
+        }
+        buffers[index].arguments.write_string(delta)
+        if buffers[index].arguments.to_string().length() > 131072 {
+          return Err(@errors.llm_error("provider tool arguments are too large"))
+        }
+      }
+      _ => ()
+    }
+  }
+  let calls : Array[ToolCall] = []
+  for buffer in buffers {
+    let arguments = buffer.arguments.to_string()
+    if arguments.length() == 0 {
+      return Err(@errors.llm_error("provider omitted tool arguments"))
+    }
+    calls.push({ id: buffer.id, name: buffer.name, arguments_json: arguments })
+  }
+  Ok(calls)
 }
 
 ///|
@@ -209,7 +436,14 @@ pub fn parse_sse(
   if !done {
     return Err(@errors.llm_error("provider stream ended before [DONE]"))
   }
-  if output.to_string().length() == 0 {
+  let calls = match assemble_tool_calls(events) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  for call in calls {
+    events.push(ToolCallCompleted(call))
+  }
+  if output.to_string().length() == 0 && calls.is_empty() {
     return Err(@errors.llm_error("provider returned empty text"))
   }
   events.push(Completed)
@@ -295,7 +529,16 @@ async fn complete_stream(
   if !pending.is_empty() || !done {
     return Err(@errors.llm_error("provider stream ended before [DONE]"))
   }
-  if output.to_string().length() == 0 {
+  let calls = match assemble_tool_calls(events) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  for call in calls {
+    let event = ToolCallCompleted(call)
+    events.push(event)
+    sink(event)
+  }
+  if output.to_string().length() == 0 && calls.is_empty() {
     return Err(@errors.llm_error("provider returned empty text"))
   }
   events.push(Completed)
@@ -343,8 +586,7 @@ pub async fn complete_http(
     _ => return Err(@errors.llm_error("provider returned invalid text"))
   }
   match parse_completion(source) {
-    Ok((content, usage)) => {
-      let events = [Started, TextDelta(content), Usage(usage), Completed]
+    Ok((events, content, usage)) => {
       for event in events {
         if event != Completed {
           sink(event)

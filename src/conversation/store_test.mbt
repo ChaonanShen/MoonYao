@@ -110,3 +110,50 @@ test "chat CRUD pagination and active deletion guard" {
   }
   connection.close()
 }
+
+///|
+test "conversation migration upgrades the P5 text-only message table" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  let setup = [
+    "PRAGMA foreign_keys = ON", "CREATE TABLE _moonyao_migrations (version INTEGER PRIMARY KEY)",
+    "CREATE TABLE _moonyao_chats (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','deleted')), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+    "CREATE TABLE _moonyao_turns (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES _moonyao_chats(id) ON DELETE CASCADE, status TEXT NOT NULL CHECK(status IN ('active','completed','failed','interrupted')), error_code TEXT NOT NULL, error_message TEXT NOT NULL, prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL)",
+    "CREATE TABLE _moonyao_messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES _moonyao_chats(id) ON DELETE CASCADE, turn_id TEXT NOT NULL REFERENCES _moonyao_turns(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','assistant')), kind TEXT NOT NULL CHECK(kind = 'text'), content_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('completed','failed')), created_at INTEGER NOT NULL, UNIQUE(chat_id, sequence))",
+    "INSERT INTO _moonyao_migrations(version) VALUES (1)",
+  ]
+  for sql in setup {
+    let statement = connection.prepare(sql)
+    statement.step_once()
+    statement.finalize()
+  }
+  match migrate(connection) {
+    Ok(_) => ()
+    Err(error) => fail(error.message)
+  }
+  ignore(create_chat(connection, "chat", "todo", "upgrade", 1))
+  ignore(begin_turn(connection, "turn", "user", "chat", "hello", 2))
+  match
+    append_message(
+      connection,
+      "tool",
+      "chat",
+      "turn",
+      "tool",
+      "tool_result",
+      {
+        "tool_call_id": "call",
+        "name": "create_todo",
+        "ok": true,
+        "result": { "id": 1 },
+      },
+      3,
+    ) {
+    Ok(_) => ()
+    Err(error) => fail(error.message)
+  }
+  match list_messages(connection, "chat", 10, 0) {
+    Ok(messages) => assert_eq(messages[1].kind, "tool_result")
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}

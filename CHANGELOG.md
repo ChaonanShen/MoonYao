@@ -20,3 +20,5 @@
 - 固定 API DSL、异步 HTTP/1.1 `serve` 命令、请求限制与 Todo CRUD 路由。
 - 严格 Connector/Agent/Prompt DSL、OpenAI-compatible 普通及流式 Chat Completions。
 - SQLite 持久化 chat/turn/message、崩溃恢复、完整 turn 历史裁剪与 `agent chat` CLI。
+- Process-backed Agent tools、受限 JSON Schema、流式 tool-call 聚合、有界执行循环、持久化
+  tool transcript，以及可选的 Process-backed before/after hooks。

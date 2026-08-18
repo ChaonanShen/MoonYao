@@ -8,18 +8,21 @@ MoonYao Core 是一个使用 MoonBit Native 实现的声明式轻量应用引擎
 
 ```text
 JSON DSL -> 应用加载 -> SQLite CRUD / Process -> 顺序 Flow -> HTTP API
+         -> Agent/Prompt -> 持久化会话 -> OpenAI-compatible streaming chat
 ```
 
 ## 当前状态
 
-仓库当前已完成 JSON 应用/模型/API DSL 校验、SQLite schema 迁移、模型 CRUD Process、
-严格值绑定与顺序 Flow，以及 Native CLI 和异步 HTTP/1.1 Todo CRUD API。Agent 尚未实现。
+仓库当前已完成 JSON 应用/模型/API/Agent/Connector/Prompt DSL 校验、SQLite schema 与会话
+迁移、模型 CRUD Process、严格值绑定与顺序 Flow、异步 HTTP/1.1 Todo CRUD API，以及一个
+支持流式 OpenAI-compatible Chat Completions 的持久化文本 Agent 主链路。
 
 ## 支持范围
 
-第一版仅支持 MoonBit Native、SQLite 和严格 JSON DSL，用于声明模型、顺序 Flow 与
-固定 HTTP 路由。不实现 Yao 的 JavaScript 运行时、插件、Agent、UI、OpenAPI、认证、
-多租户、多数据库、Join 或复杂 Flow 控制。
+第一版仅支持 MoonBit Native、SQLite 和严格 JSON DSL，用于声明模型、顺序 Flow、固定
+HTTP 路由及单一文本 Agent connector。不实现 Yao 的 JavaScript 运行时、插件、UI、
+OpenAPI、认证、多租户、多数据库、Join、复杂 Flow 控制、Agent tools、RAG、附件或
+multi-agent。
 
 ## 开发环境
 
@@ -92,7 +95,43 @@ API 文件位于 `apis/*.json`。支持 GET/POST/PATCH/DELETE、`:param`、query
 JSON body。当前服务仅适合 loopback 本地开发，没有认证、TLS server、CORS、上传或
 静态文件服务；JSON body 上限为 1 MiB，query 最多 100 项。
 
-`check` 只校验 DSL，不创建数据库；`migrate` 幂等创建尚不存在的表；`run` 接受一个
+## Agent 对话
+
+`example/todo` 包含一个 `todo` Agent。Connector 固定放在
+`connectors/default.json`，API key 只填写环境变量名，不写入 DSL：
+
+```json
+{
+  "id": "default",
+  "type": "openai_chat",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "OPENAI_API_KEY",
+  "model": "gpt-4o-mini",
+  "timeout_ms": 60000
+}
+```
+
+Agent 位于 `agents/<id>/agent.json`，同目录的 `prompts.json` 只接受 1 至 8 条
+`system` 文本消息。首次对话会创建 chat，最终 JSON 行包含后续调用需要的 `chat_id`：
+
+```bash
+export OPENAI_API_KEY='...'
+moon run src/cmd/main -- migrate ./example/todo
+moon run src/cmd/main -- agent chat ./example/todo todo "Help me plan today's tasks"
+moon run src/cmd/main -- agent chat ./example/todo todo "Which one should I do first?" --chat <chat-id>
+```
+
+命令在 stdout 逐行输出 `turn.started`、`message.delta`、`usage`、
+`message.completed` 和最终 `turn.completed` JSON。会话、turn 和最终 assistant 文本保存在
+应用 SQLite 数据库中；进程重启后可以继续同一个 chat。历史只回放成功的完整 turn，并按
+100 条消息和 256 KiB UTF-8 内容上限从最旧完整 turn 开始裁剪。
+
+P5 只支持 `system`/`user`/`assistant` 文本和一个 `default` connector，不支持 tool call、
+hook、图片、附件、provider fallback 或供应商 conversation ID。`check` 不读取 API key、
+不联网也不访问数据库；key 仅在发起模型请求时读取，Authorization、完整 prompt 和响应
+正文不会写入错误信息。
+
+`check` 只校验 DSL，不创建数据库；`migrate` 幂等创建模型表和内部会话表；`run` 接受一个
 Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构化 JSON 错误并以非零状态
 退出。数据库路径相对于应用目录解析。
 
@@ -108,6 +147,7 @@ Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构�
 3. 实现 SQLite Schema 创建及全部使用参数绑定的 CRUD Process。
 4. 实现输入/结果绑定与顺序 Flow。（已完成）
 5. 实现 HTTP 路由、CLI 子命令与 Todo 端到端示例。（已完成）
+6. 实现严格 Agent DSL、单一流式 connector 与持久化多轮会话。（已完成）
 
 每个有效功能均须先建立 GitHub Issue，并通过聚焦的分支与 Pull Request 实现。
 

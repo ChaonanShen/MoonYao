@@ -1,0 +1,17 @@
+# Machine- and developer-specific notes, settings, and artifacts.
+*.local
+*.local.*
+.local/
+
+# MoonBit build artifacts and local tool state.
+_build/
+target/
+*.mbti
+
+# Runtime data and temporary files.
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store

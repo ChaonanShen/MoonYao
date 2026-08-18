@@ -16,6 +16,7 @@ fn default_sql(
     True => Ok("1")
     False => Ok("0")
     Number(number, ..) => Ok(number.to_string())
+    String(value) => Ok("'" + value.replace_all(old="'", new="''") + "'")
     _ =>
       Err(
         @errors.invalid_dsl(
@@ -83,13 +84,22 @@ pub fn migrate(
     Ok(value) => value
     Err(error) => return Err(error)
   }
+  let statement = connection.prepare(sql) catch {
+    (_ : @sqlite3.SqliteError) =>
+      return Err(
+        @errors.database_error("could not prepare model schema", model.name),
+      )
+  }
   try {
-    let statement = connection.prepare(sql)
     statement.step_once()
     statement.finalize()
     Ok(())
   } catch {
-    (_ : @sqlite3.SqliteError) =>
-      Err(@errors.invalid_dsl("could not create model schema", model.name))
+    (_ : @sqlite3.SqliteError) => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not create model schema", model.name))
+    }
   }
 }

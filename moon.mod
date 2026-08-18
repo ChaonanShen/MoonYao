@@ -19,4 +19,5 @@ description = "A small declarative application engine for MoonBit Native."
 import {
   "moonbitlang/x@0.4.50",
   "moonbit-community/sqlite3@0.1.6",
+  "moonbitlang/async@0.20.6",
 }

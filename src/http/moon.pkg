@@ -1,0 +1,9 @@
+import {
+  "ChaonanShen/MoonYao/binding",
+  "ChaonanShen/MoonYao/errors",
+  "ChaonanShen/MoonYao/model",
+  "ChaonanShen/MoonYao/process",
+  "moonbitlang/core/json",
+  "moonbitlang/core/string",
+  "moonbit-community/sqlite3",
+}

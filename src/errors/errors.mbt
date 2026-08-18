@@ -7,6 +7,7 @@ pub(all) enum ErrorCode {
   ProcessNotFound
   FlowNotFound
   RouteNotFound
+  MethodNotAllowed
   RecordNotFound
   DatabaseError
   InternalError
@@ -30,6 +31,7 @@ pub fn ErrorCode::as_string(self : ErrorCode) -> String {
     ProcessNotFound => "process_not_found"
     FlowNotFound => "flow_not_found"
     RouteNotFound => "route_not_found"
+    MethodNotAllowed => "method_not_allowed"
     RecordNotFound => "record_not_found"
     DatabaseError => "database_error"
     InternalError => "internal_error"
@@ -58,6 +60,16 @@ pub fn process_not_found(name : String) -> EngineError {
 ///|
 pub fn flow_not_found(name : String) -> EngineError {
   { code: FlowNotFound, message: "flow '\{name}' was not found", path: "flow" }
+}
+
+///|
+pub fn route_not_found(path : String) -> EngineError {
+  { code: RouteNotFound, message: "route was not found", path }
+}
+
+///|
+pub fn method_not_allowed(allow : String) -> EngineError {
+  { code: MethodNotAllowed, message: "method not allowed", path: allow }
 }
 
 ///|

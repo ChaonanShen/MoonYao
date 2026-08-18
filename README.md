@@ -12,8 +12,8 @@ JSON DSL -> 应用加载 -> SQLite CRUD / Process -> 顺序 Flow -> HTTP API
 
 ## 当前状态
 
-仓库当前已完成 JSON 应用/模型 DSL 校验、SQLite schema 迁移、模型 CRUD Process、严格
-值绑定与顺序 Flow，以及对应的 Native CLI。HTTP 和 Agent 尚未实现。
+仓库当前已完成 JSON 应用/模型/API DSL 校验、SQLite schema 迁移、模型 CRUD Process、
+严格值绑定与顺序 Flow，以及 Native CLI 和异步 HTTP/1.1 Todo CRUD API。Agent 尚未实现。
 
 ## 支持范围
 
@@ -74,7 +74,23 @@ moon run src/cmd/main -- run ./example/todo models.todo.Update '{"id":1,"data":{
 moon run src/cmd/main -- run ./example/todo models.todo.Find '{"id":1}'
 moon run src/cmd/main -- run ./example/todo models.todo.Delete '{"id":1}'
 moon run src/cmd/main -- run ./example/todo flows.create_todo '{"body":{"title":"learn Flow"}}'
+moon run src/cmd/main -- serve ./example/todo
 ```
+
+服务缺省监听 `127.0.0.1:8080`，可在 `app.json` 通过 `listen` 设置另一个 IP literal 和
+端口。启动前必须先运行 `migrate`。例如：
+
+```bash
+curl -X POST http://127.0.0.1:8080/todos -H 'Content-Type: application/json' -d '{"title":"HTTP Todo"}'
+curl http://127.0.0.1:8080/todos
+curl http://127.0.0.1:8080/todos/1
+curl -X PATCH http://127.0.0.1:8080/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
+curl -X DELETE http://127.0.0.1:8080/todos/1
+```
+
+API 文件位于 `apis/*.json`。支持 GET/POST/PATCH/DELETE、`:param`、query、headers 和
+JSON body。当前服务仅适合 loopback 本地开发，没有认证、TLS server、CORS、上传或
+静态文件服务；JSON body 上限为 1 MiB，query 最多 100 项。
 
 `check` 只校验 DSL，不创建数据库；`migrate` 幂等创建尚不存在的表；`run` 接受一个
 Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构化 JSON 错误并以非零状态
@@ -91,7 +107,7 @@ Process 名称和一个 JSON 值，成功时输出 JSON，失败时输出结构�
 2. 在无副作用条件下加载并校验 Model DSL。
 3. 实现 SQLite Schema 创建及全部使用参数绑定的 CRUD Process。
 4. 实现输入/结果绑定与顺序 Flow。（已完成）
-5. 实现 HTTP 路由、CLI 子命令与 Todo 端到端示例。
+5. 实现 HTTP 路由、CLI 子命令与 Todo 端到端示例。（已完成）
 
 每个有效功能均须先建立 GitHub Issue，并通过聚焦的分支与 Pull Request 实现。
 

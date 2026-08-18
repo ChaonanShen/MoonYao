@@ -1,0 +1,11 @@
+{
+  "id": "todo",
+  "name": "Todo API",
+  "routes": [
+    { "method": "GET", "path": "/todos", "process": "models.todo.List", "input": {} },
+    { "method": "GET", "path": "/todos/:id", "process": "models.todo.Find", "input": { "id": "$in.params.id" } },
+    { "method": "POST", "path": "/todos", "process": "flows.create_todo", "input": { "body": "$in.body" } },
+    { "method": "PATCH", "path": "/todos/:id", "process": "models.todo.Update", "input": { "id": "$in.params.id", "data": "$in.body" } },
+    { "method": "DELETE", "path": "/todos/:id", "process": "models.todo.Delete", "input": { "id": "$in.params.id" } }
+  ]
+}

@@ -5,18 +5,20 @@ pub(all) struct Application {
   models : Array[@model.Model]
   flows : Array[@flow.Flow]
   globals : Map[String, Json]
+  apis : Array[@http.Api]
+  listen : String
 } derive(Debug)
 
 ///|
 fn parse_app(
   value : Json,
   path : String,
-) -> Result[(String, String, Map[String, Json]), @errors.EngineError] {
+) -> Result[(String, String, Map[String, Json], String), @errors.EngineError] {
   guard value is Object(object) else {
     return Err(@errors.invalid_dsl("expected an object", path))
   }
   for key in object.keys() {
-    if key != "name" && key != "database" && key != "globals" {
+    if key != "name" && key != "database" && key != "globals" && key != "listen" {
       return Err(@errors.invalid_dsl("unknown key '\{key}'", path + "." + key))
     }
   }
@@ -53,7 +55,18 @@ fn parse_app(
       )
     }
   }
-  Ok((name, database, globals))
+  let listen = match object.get("listen") {
+    None => "127.0.0.1:8080"
+    Some(String(value)) if @http.valid_listen_address(value) => value
+    Some(_) =>
+      return Err(
+        @errors.invalid_dsl(
+          "listen must be an IP literal and port",
+          path + ".listen",
+        ),
+      )
+  }
+  Ok((name, database, globals, listen))
 }
 
 ///|
@@ -74,7 +87,8 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
     Ok(value) => value
     Err(error) => return Err(error)
   }
-  let (name, database, globals) = match parse_app(app_json, "app.json") {
+  let (name, database, globals, listen) = match
+    parse_app(app_json, "app.json") {
     Ok(value) => value
     Err(error) => return Err(error)
   }
@@ -170,7 +184,46 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
       return Err(@errors.invalid_dsl("flow call cycle", "flows." + flow.id))
     }
   }
-  Ok({ name, database, models, flows, globals })
+  let api_directory = root + "/apis"
+  let apis : Array[@http.Api] = []
+  if @fs.path_exists(api_directory) {
+    let entries = @fs.read_dir(api_directory) catch {
+      (_ : @fs.IOError) =>
+        return Err(@errors.invalid_dsl("could not read APIs directory", "apis"))
+    }
+    entries.sort()
+    for entry in entries {
+      if entry.has_suffix(".json") {
+        let relative_path = "apis/" + entry
+        let json = match read_json(api_directory + "/" + entry) {
+          Ok(value) => value
+          Err(error) => return Err(error)
+        }
+        let api = match @http.parse_api(json, relative_path) {
+          Ok(value) => value
+          Err(error) => return Err(error)
+        }
+        if apis.any(existing => existing.id == api.id) {
+          return Err(
+            @errors.invalid_dsl("duplicate API id", relative_path + ".id"),
+          )
+        }
+        for route in api.routes {
+          if !process_names.contains(route.process) {
+            return Err(
+              @errors.invalid_dsl("unknown process", relative_path + ".routes"),
+            )
+          }
+        }
+        match @http.validate_route_set(apis, api, relative_path) {
+          Err(error) => return Err(error)
+          Ok(_) => ()
+        }
+        apis.push(api)
+      }
+    }
+  }
+  Ok({ name, database, models, flows, globals, apis, listen })
 }
 
 ///|

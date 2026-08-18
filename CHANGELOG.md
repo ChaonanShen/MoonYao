@@ -12,3 +12,4 @@
 - SQLite schema 迁移及参数绑定的模型 Find/List/Create/Update/Delete Process。
 - `check`、`migrate`、`run` CLI 子命令和 Todo 示例。
 - 严格 `$in`、`$res`、`$global` JSON 值绑定与顺序 Flow Process。
+- 固定 API DSL、异步 HTTP/1.1 `serve` 命令、请求限制与 Todo CRUD 路由。

@@ -2,7 +2,7 @@
 
 本文件记录 MoonYao Core 的重要变更。
 
-## 未发布
+## 0.1.0 - 2026-08-18
 
 ### 变更
 
@@ -26,3 +26,5 @@
   Web CUI；包含 request ID、CSP、安全响应头和断线后继续持久化。
 - Conversation chat、message 和 turn 时间字段改用 64 位 Unix milliseconds，避免长时间戳
   截断并保持 API 排序稳定。
+- 独立的 `example/todo-agent` 主发布示例，以及覆盖 429、500、timeout、malformed、disconnect、
+  20 次顺序 turn 和不同 chat 并发运行的离线验收。

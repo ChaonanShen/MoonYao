@@ -18,6 +18,9 @@ jobs:
 
       - name: Set up MoonBit
         uses: hustcer/setup-moonbit@v1.22
+        with:
+          version: 0.10.8+8606a5800
+          core-version: 0.10.8+8606a5800
 
       - name: Display toolchain version
         run: moon version --all

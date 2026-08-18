@@ -6,7 +6,7 @@
 | 条目 | 来源及固定版本/提交 | 许可证 | 在 MoonYao 中的用途 |
 | --- | --- | --- | --- |
 | Yao Agent / Yao App Engine | [YaoApp/yao](https://github.com/YaoApp/yao)，提交 [`1eb2bb1ec89540bd50345b2b456eeb087bc21de0`](https://github.com/YaoApp/yao/tree/1eb2bb1ec89540bd50345b2b456eeb087bc21de0)；[Yao Agent 公开文档](https://yaoapps.com/docs/tutorials/en-us/agent/yao-agent) | 修改版 Apache-2.0；附加商业、品牌和验证要求，详见[上游 LICENSE](https://github.com/YaoApp/yao/blob/main/LICENSE) | 作为 Agent package/prompt/connector、conversation、streaming、Process tools 与执行模型的公开规格和可观察行为参考。MoonYao 在 MoonBit 中独立设计实现；不复制、翻译或改写上游源码。Model、Process、Flow 与 HTTP 只实现 Agent 工具所需的最小子集，不移植完整应用引擎。 |
-| MoonBit 工具链与核心库 | [moonbitlang/moon](https://github.com/moonbitlang/moon)、[moonbitlang/core](https://github.com/moonbitlang/core) | 工具链：AGPL-3.0；Core：Apache-2.0 | MoonBit 提供的构建工具与标准库；不随本仓库分发。 |
+| MoonBit 工具链与核心库 | [moonbitlang/moon](https://github.com/moonbitlang/moon) `0.1.20260814` (`a2de5b2`)、`moonc v0.10.8+8606a5800`；[moonbitlang/core](https://github.com/moonbitlang/core)，随该工具链解析的版本 | 工具链：AGPL-3.0；Core：Apache-2.0 | MoonBit 提供的构建工具与标准库；不随本仓库分发。Docker 与 0.1.0 发布验收使用这些精确工具链版本。 |
 | `moonbitlang/x@0.4.50` | [moonbitlang/x](https://github.com/moonbitlang/x)，版本 `0.4.50` | Apache-2.0 | 仅使用 Native `fs` 包读取应用 DSL 文件和目录；不复制其源码。 |
 | `moonbit-community/sqlite3@0.1.6` | [moonbit-community/sqlite3.mbt](https://github.com/moonbit-community/sqlite3.mbt)，版本 `0.1.6` | Apache-2.0 | Native SQLite 绑定；用于 P2 的参数绑定、内存数据库和 schema/CRUD 实现。 |
 | `moonbitlang/async@0.20.6` | [moonbitlang/async](https://github.com/moonbitlang/async)，版本 `0.20.6` | Apache-2.0 | Native async runtime、TCP、HTTP/1.1 server，以及 OpenAI-compatible HTTPS client、timeout 和增量 SSE 读取；不复制其源码。 |

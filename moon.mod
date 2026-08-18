@@ -15,3 +15,7 @@ preferred_target = "native"
 source = "src"
 
 description = "A small declarative application engine for MoonBit Native."
+
+import {
+  "moonbitlang/x@0.4.50",
+}

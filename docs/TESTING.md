@@ -20,7 +20,7 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev fmt --ch
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev check --target native
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev test --target native
 docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev build --target native
-docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main
+docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/cmd/main -- bootstrap
 ```
 
 提交 MoonBit、配置、文档或 CI 变更前，至少应完成前四项；修改可执行程序或示例时，还应
@@ -38,9 +38,10 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/
 2. 下载 MoonBit 所需的系统工具；
 3. MoonBit 官方安装脚本；
 4. 仅 Native 构建需要的 C 工具链；
-5. 工作目录和入口点。
+5. Mooncakes 注册表索引预热；
+6. 工作目录和入口点。
 
-修改第五层之后的运行方式不会重新下载 MoonBit；只有修改相应层的 Dockerfile 内容、主动
+修改第六层之后的运行方式不会重新下载 MoonBit；只有修改相应层的 Dockerfile 内容、主动
 使用 `--no-cache`，或本地 Docker 清除了缓存时，才会重建前面的层。升级 MoonBit 时应有
 意地修改工具链安装层，并在同一 PR 重新执行完整测试。
 

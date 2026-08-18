@@ -53,7 +53,7 @@ moon fmt --check
 moon check --target native
 moon test --target native
 moon build --target native
-moon run src/cmd/main
+moon run src/cmd/main -- bootstrap
 ```
 
 当前程序会输出：
@@ -62,11 +62,18 @@ moon run src/cmd/main
 MoonYao Core bootstrap: Native runtime is ready.
 ```
 
-## 实现计划
+## DSL 检查
 
-实施路线、阶段验收和人工验证入口见 [docs/plans/P0-foundation.md](docs/plans/P0-foundation.md)；
-第一版的稳定架构、Process 协议和安全约束见
-[docs/architecture.md](docs/architecture.md)。后续按以下顺序推进：
+当前 CLI 提供无副作用的应用 DSL 校验：
+
+```bash
+moon run src/cmd/main -- check ./testdata/apps/valid
+```
+
+合法应用会输出应用摘要；非法 JSON DSL 会以非零退出码返回结构化 JSON 错误。SQLite
+迁移、Process 调用和 HTTP 服务将在后续版本提供。
+
+## 实现计划
 
 1. 定义结构化错误和单一 JSON 值的 Process 协议。
 2. 在无副作用条件下加载并校验 Model DSL。

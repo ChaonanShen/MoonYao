@@ -10,6 +10,9 @@ pub(all) enum ErrorCode {
   MethodNotAllowed
   RecordNotFound
   DatabaseError
+  ChatNotFound
+  TurnConflict
+  LlmError
   InternalError
 } derive(Eq, Debug)
 
@@ -34,6 +37,9 @@ pub fn ErrorCode::as_string(self : ErrorCode) -> String {
     MethodNotAllowed => "method_not_allowed"
     RecordNotFound => "record_not_found"
     DatabaseError => "database_error"
+    ChatNotFound => "chat_not_found"
+    TurnConflict => "turn_conflict"
+    LlmError => "llm_error"
     InternalError => "internal_error"
   }
 }
@@ -80,6 +86,30 @@ pub fn record_not_found(path : String) -> EngineError {
 ///|
 pub fn database_error(message : String, path : String) -> EngineError {
   { code: DatabaseError, message, path }
+}
+
+///|
+pub fn chat_not_found() -> EngineError {
+  { code: ChatNotFound, message: "chat was not found", path: "chat" }
+}
+
+///|
+pub fn turn_conflict() -> EngineError {
+  {
+    code: TurnConflict,
+    message: "chat already has an active turn",
+    path: "chat",
+  }
+}
+
+///|
+pub fn llm_error(message : String) -> EngineError {
+  { code: LlmError, message, path: "llm" }
+}
+
+///|
+pub fn internal_error(message : String, path : String) -> EngineError {
+  { code: InternalError, message, path }
 }
 
 ///|

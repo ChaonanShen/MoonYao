@@ -1,0 +1,1 @@
+{ "id": "bad", "name": "Bad", "nodes": [{ "name": "first", "process": "models.todo.List", "input": "$res.second" }, { "name": "second", "process": "models.todo.List", "input": {} }], "output": "$res.first" }

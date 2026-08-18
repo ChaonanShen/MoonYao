@@ -11,3 +11,4 @@
 - 严格 JSON 应用与 Model DSL 校验。
 - SQLite schema 迁移及参数绑定的模型 Find/List/Create/Update/Delete Process。
 - `check`、`migrate`、`run` CLI 子命令和 Todo 示例。
+- 严格 `$in`、`$res`、`$global` JSON 值绑定与顺序 Flow Process。

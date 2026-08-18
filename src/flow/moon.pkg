@@ -1,7 +1,6 @@
 import {
+  "ChaonanShen/MoonYao/binding",
   "ChaonanShen/MoonYao/errors",
-  "ChaonanShen/MoonYao/flow",
   "ChaonanShen/MoonYao/model",
   "moonbitlang/core/json",
-  "moonbitlang/x/fs",
 }

@@ -24,3 +24,15 @@ test "application loader rejects duplicate model names" {
     Ok(_) => fail("expected invalid DSL")
   }
 }
+
+///|
+test "application loader rejects Flow cycles and forward references" {
+  match load("testdata/apps/invalid-flow-cycle") {
+    Err(error) => assert_eq(error.code, @errors.InvalidDsl)
+    Ok(_) => fail("expected Flow cycle")
+  }
+  match load("testdata/apps/invalid-flow-forward") {
+    Err(error) => assert_eq(error.code, @errors.InvalidDsl)
+    Ok(_) => fail("expected forward reference")
+  }
+}

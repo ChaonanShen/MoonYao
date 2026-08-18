@@ -1,11 +1,22 @@
 ///|
 pub(all) struct Registry {
   models : Array[@model.Model]
+  flows : Array[@flow.Flow]
+  globals : Map[String, Json]
 }
 
 ///|
 pub fn Registry::new(models : Array[@model.Model]) -> Registry {
-  { models, }
+  { models, flows: [], globals: Map([]) }
+}
+
+///|
+pub fn Registry::with_flows(
+  models : Array[@model.Model],
+  flows : Array[@flow.Flow],
+  globals : Map[String, Json],
+) -> Registry {
+  { models, flows, globals }
 }
 
 ///|
@@ -17,7 +28,21 @@ pub fn Registry::names(self : Registry) -> Array[String] {
       names.push(prefix + operation)
     }
   }
+  for flow in self.flows {
+    names.push("flows." + flow.id)
+  }
+  names.sort()
   names
+}
+
+///|
+fn find_flow(registry : Registry, process : String) -> @flow.Flow? {
+  for flow in registry.flows {
+    if process == "flows." + flow.id {
+      return Some(flow)
+    }
+  }
+  None
 }
 
 ///|
@@ -636,16 +661,28 @@ pub fn Registry::run(
   process : String,
   input : Json,
 ) -> Result[Json, @errors.EngineError] {
-  let (model, operation) = match find_process_model(self, process) {
-    Some(value) => value
-    None => return Err(@errors.process_not_found(process))
+  match find_process_model(self, process) {
+    Some((model, operation)) =>
+      return match operation {
+        "Find" => run_find(connection, model, input)
+        "List" => run_list(connection, model, input)
+        "Create" => run_create(connection, model, input)
+        "Update" => run_update(connection, model, input)
+        "Delete" => run_delete(connection, model, input)
+        _ => Err(@errors.process_not_found(process))
+      }
+    None => ()
   }
-  match operation {
-    "Find" => run_find(connection, model, input)
-    "List" => run_list(connection, model, input)
-    "Create" => run_create(connection, model, input)
-    "Update" => run_update(connection, model, input)
-    "Delete" => run_delete(connection, model, input)
-    _ => Err(@errors.process_not_found(process))
+  match find_flow(self, process) {
+    Some(flow) =>
+      @flow.execute(flow, input, self.globals, fn(name, value) {
+        self.run(connection, name, value)
+      })
+    None =>
+      if process.has_prefix("flows.") {
+        Err(@errors.flow_not_found(process))
+      } else {
+        Err(@errors.process_not_found(process))
+      }
   }
 }

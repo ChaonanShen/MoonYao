@@ -6,5 +6,6 @@ import {
   "ChaonanShen/MoonYao/llm",
   "ChaonanShen/MoonYao/model",
   "moonbitlang/core/json",
+  "moonbitlang/core/env",
   "moonbitlang/x/fs",
 }

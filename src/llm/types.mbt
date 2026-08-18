@@ -97,6 +97,27 @@ fn required_string(
 }
 
 ///|
+fn resolve_env_reference(
+  value : String,
+  path : String,
+) -> Result[String, @errors.EngineError] {
+  if value.has_prefix("${") && value.has_suffix("}") {
+    let name = value[2:value.length() - 1].to_owned()
+    if !env_name(name) {
+      return Err(
+        @errors.invalid_dsl("invalid environment variable reference", path),
+      )
+    }
+    match @env.get_env_var(name) {
+      Some(resolved) if resolved.length() > 0 => Ok(resolved)
+      _ => Err(@errors.invalid_dsl("environment variable is not set", path))
+    }
+  } else {
+    Ok(value)
+  }
+}
+
+///|
 fn env_name(value : String) -> Bool {
   if value.length() == 0 {
     return false
@@ -188,6 +209,10 @@ pub fn parse_connector(
     Ok(v) => v
     Err(e) => return Err(e)
   }
+  base_url = match resolve_env_reference(base_url, path + ".base_url") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
   if !valid_base_url(base_url) {
     return Err(
       @errors.invalid_dsl("invalid connector base URL", path + ".base_url"),
@@ -200,6 +225,11 @@ pub fn parse_connector(
     Ok(v) => v
     Err(e) => return Err(e)
   }
+  let api_key_env = match
+    resolve_env_reference(api_key_env, path + ".api_key_env") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
   if !env_name(api_key_env) {
     return Err(
       @errors.invalid_dsl(
@@ -209,6 +239,10 @@ pub fn parse_connector(
     )
   }
   let model = match required_string(object, "model", path) {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  let model = match resolve_env_reference(model, path + ".model") {
     Ok(v) => v
     Err(e) => return Err(e)
   }

@@ -7,6 +7,52 @@ fn usage_error() -> @errors.EngineError {
 }
 
 ///|
+fn dotenv_value(source : String) -> String {
+  let value = source.trim().to_owned()
+  if value.length() >= 2 {
+    let first = value[0]
+    let last = value[value.length() - 1]
+    if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+      return value[1:value.length() - 1].to_owned()
+    }
+  }
+  value
+}
+
+///|
+fn load_dotenv(path : String) -> Unit {
+  let source = @fs.read_file_to_string(path) catch { _ => return }
+  for raw_line in source.split("\n") {
+    let line = raw_line.trim()
+    if line.length() == 0 || line.has_prefix("#") {
+      continue
+    }
+    let assignment = if line.has_prefix("export ") {
+      line[7:].trim()
+    } else {
+      line
+    }
+    let parts : Array[String] = []
+    assignment.split("=").each(part => parts.push(part.to_owned()))
+    if parts.length() < 2 {
+      continue
+    }
+    let key = parts[0].trim().to_owned()
+    if key.length() == 0 || @env.get_env_var(key) is Some(_) {
+      continue
+    }
+    let value = StringBuilder::new()
+    for index = 1; index < parts.length(); index = index + 1 {
+      if index > 1 {
+        value.write_char('=')
+      }
+      value.write_string(parts[index])
+    }
+    @env.set_env_var(key, dotenv_value(value.to_string()))
+  }
+}
+
+///|
 fn database_path(app_dir : String, configured : String) -> String {
   if configured.has_prefix("/") {
     configured
@@ -867,6 +913,8 @@ fn execute(args : Array[String]) -> Result[String, @errors.EngineError] {
 
 ///|
 fn main {
+  load_dotenv(".env.local")
+  load_dotenv(".env")
   let args = @env.args()
   let command_args = args[1:].to_owned()
   if command_args.length() == 2 && command_args[0] == "serve" {

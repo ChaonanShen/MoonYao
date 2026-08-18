@@ -11,6 +11,14 @@ test "application loader reads a valid application" {
 
 ///|
 test "application loader resolves both release examples" {
+  @env.set_env_var("LLM_BASE_URL", "https://api.deepseek.com/v1")
+  @env.set_env_var("LLM_API_KEY_ENV", "LLM_API_KEY")
+  @env.set_env_var("LLM_MODEL", "deepseek-chat")
+  defer {
+    @env.unset_env_var("LLM_BASE_URL")
+    @env.unset_env_var("LLM_API_KEY_ENV")
+    @env.unset_env_var("LLM_MODEL")
+  }
   for path in ["example/todo", "example/todo-agent"] {
     match load(path) {
       Ok(application) => {

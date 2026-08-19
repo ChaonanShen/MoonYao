@@ -102,7 +102,15 @@ fn resolve_env_reference(
   path : String,
 ) -> Result[String, @errors.EngineError] {
   if value.has_prefix("${") && value.has_suffix("}") {
-    let name = value[2:value.length() - 1].to_owned()
+    let expression = value[2:value.length() - 1].to_owned()
+    let parts : Array[String] = []
+    expression.split(":-").each(part => parts.push(part.to_owned()))
+    if parts.length() > 2 {
+      return Err(
+        @errors.invalid_dsl("invalid environment variable reference", path),
+      )
+    }
+    let name = parts[0]
     if !env_name(name) {
       return Err(
         @errors.invalid_dsl("invalid environment variable reference", path),
@@ -110,6 +118,7 @@ fn resolve_env_reference(
     }
     match @env.get_env_var(name) {
       Some(resolved) if resolved.length() > 0 => Ok(resolved)
+      _ if parts.length() == 2 && parts[1].length() > 0 => Ok(parts[1])
       _ => Err(@errors.invalid_dsl("environment variable is not set", path))
     }
   } else {

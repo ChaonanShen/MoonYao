@@ -48,6 +48,35 @@ test "connector parser is strict and normalizes its base URL" {
 }
 
 ///|
+test "connector environment references support defaults and overrides" {
+  @env.unset_env_var("MOONYAO_TEST_CONNECTOR_URL")
+  @env.unset_env_var("MOONYAO_TEST_CONNECTOR_KEY")
+  @env.unset_env_var("MOONYAO_TEST_CONNECTOR_MODEL")
+  defer {
+    @env.unset_env_var("MOONYAO_TEST_CONNECTOR_URL")
+    @env.unset_env_var("MOONYAO_TEST_CONNECTOR_KEY")
+    @env.unset_env_var("MOONYAO_TEST_CONNECTOR_MODEL")
+  }
+  let source : Json = {
+    "id": "default",
+    "type": "openai_chat",
+    "base_url": "${MOONYAO_TEST_CONNECTOR_URL:-https://api.deepseek.com/v1}",
+    "api_key_env": "${MOONYAO_TEST_CONNECTOR_KEY:-LLM_API_KEY}",
+    "model": "${MOONYAO_TEST_CONNECTOR_MODEL:-deepseek-chat}",
+    "timeout_ms": 60000,
+  }
+  match parse_connector(source, "connectors/default.json") {
+    Ok(connector) => assert_eq(connector.model, "deepseek-chat")
+    Err(error) => fail(error.message)
+  }
+  @env.set_env_var("MOONYAO_TEST_CONNECTOR_MODEL", "deepseek-reasoner")
+  match parse_connector(source, "connectors/default.json") {
+    Ok(connector) => assert_eq(connector.model, "deepseek-reasoner")
+    Err(error) => fail(error.message)
+  }
+}
+
+///|
 test "non-stream requests omit stream-only options" {
   let request : ChatRequest = {
     model: "fake",

@@ -1,8 +1,8 @@
 {
   "id": "default",
   "type": "openai_chat",
-  "base_url": "${LLM_BASE_URL}",
-  "api_key_env": "${LLM_API_KEY_ENV}",
-  "model": "${LLM_MODEL}",
+  "base_url": "${LLM_BASE_URL:-https://api.deepseek.com/v1}",
+  "api_key_env": "${LLM_API_KEY_ENV:-LLM_API_KEY}",
+  "model": "${LLM_MODEL:-deepseek-chat}",
   "timeout_ms": 60000
 }

@@ -106,9 +106,9 @@ Connector 固定放在
 {
   "id": "default",
   "type": "openai_chat",
-  "base_url": "https://api.openai.com/v1",
-  "api_key_env": "OPENAI_API_KEY",
-  "model": "gpt-4o-mini",
+  "base_url": "${LLM_BASE_URL:-https://api.deepseek.com/v1}",
+  "api_key_env": "${LLM_API_KEY_ENV:-LLM_API_KEY}",
+  "model": "${LLM_MODEL:-deepseek-chat}",
   "timeout_ms": 60000
 }
 ```
@@ -152,7 +152,7 @@ Agent 位于 `agents/<id>/agent.json`，同目录的 `prompts.json` 只接受 1 
 首次对话会创建 chat，最终 JSON 行包含后续调用需要的 `chat_id`：
 
 ```bash
-export OPENAI_API_KEY='...'
+export LLM_API_KEY='...'
 moon run src/cmd/main -- check ./example/todo-agent
 moon run src/cmd/main -- migrate ./example/todo-agent
 moon run src/cmd/main -- agent chat ./example/todo-agent todo "Help me plan today's tasks"
@@ -179,7 +179,7 @@ round、32 个 tool calls，tool result 最大 256 KiB，总预算为 5 分钟�
 完成迁移后启动服务并打开 `http://127.0.0.1:8080/agent/`：
 
 ```bash
-export OPENAI_API_KEY='...'
+export LLM_API_KEY='...'
 moon run src/cmd/main -- migrate ./example/todo-agent
 moon run src/cmd/main -- serve ./example/todo-agent
 ```

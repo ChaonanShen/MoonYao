@@ -64,6 +64,111 @@ async test "fake client runs three persisted turns and restart-compatible histor
 }
 
 ///|
+async test "canonical turn persists multipart input and attachment references" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let attachment : @attachment.Attachment = {
+    id: "att_abcdefghijklmnopqrst",
+    storage_key: "ab/att_abcdefghijklmnopqrst",
+    filename: "notes.txt",
+    media_type: "text/plain",
+    byte_size: 5,
+    sha256: @attachment.digest(b"hello"),
+    kind: @attachment.Text,
+    status: "ready",
+    created_at: 1,
+    deleted_at: 0,
+  }
+  match @attachment.insert(connection, attachment) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  let message : @content.Message = {
+    role: @content.User,
+    content: Some(
+      @content.Parts([
+        @content.TextPart("Read this"),
+        @content.FileRef(attachment.id, attachment.filename),
+      ]),
+    ),
+    name: None,
+    tool_call_id: None,
+    reasoning_content: None,
+    tool_calls: [],
+    refusal: None,
+  }
+  let wire : Json = {
+    "role": "user",
+    "content": [
+      { "type": "text", "text": "Read this" },
+      { "type": "text", "text": "hello" },
+    ],
+  }
+  match
+    run_turn_message(
+      connection,
+      {
+        id: "todo",
+        name: "Todo",
+        description: "",
+        connector: "default",
+        options: { temperature: 0.0, max_tokens: 32 },
+        prompts: [],
+        tools: [],
+        tool_names: [],
+        before_process: "",
+        after_process: "",
+      },
+      {
+        id: "default",
+        connector_type: "openai_chat",
+        base_url: "http://127.0.0.1:1/v1",
+        api_key_env: "TEST_KEY",
+        model: "fake",
+        timeout_ms: 1000,
+      },
+      Client::Fake({
+        events: [@llm.Started, @llm.TextDelta("done"), @llm.Completed],
+        content: "done",
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+        error: None,
+      }),
+      None,
+      message,
+      "Read this [File: notes.txt]",
+      wire,
+      {
+        chat_id: "canonical-chat",
+        turn_id: "canonical-turn",
+        user_message_id: "canonical-user",
+        assistant_message_id: "canonical-assistant",
+      },
+      1,
+      (_, _) => Err(@errors.internal_error("unexpected invocation", "test")),
+      _ => (),
+    ) {
+    Err(error) => fail(error.message)
+    Ok(result) => assert_eq(result.content, "done")
+  }
+  match @conversation.list_canonical(connection, "canonical-chat") {
+    Ok(messages) => {
+      assert_eq(messages.length(), 2)
+      assert_eq(messages[0].message, message)
+    }
+    Err(error) => fail(error.message)
+  }
+  match @conversation.list_messages(connection, "canonical-chat", 10, 0) {
+    Ok(messages) => {
+      assert_eq(messages[0].kind, "multipart")
+      assert_true(messages[0].content.contains("notes.txt"))
+    }
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}
+
+///|
 async test "twenty sequential turns leave no active turn" {
   ignore(@async.now())
   let connection = @sqlite3.Connection::open(":memory:")

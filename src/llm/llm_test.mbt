@@ -81,6 +81,7 @@ test "non-stream requests omit stream-only options" {
   let request : ChatRequest = {
     model: "fake",
     messages: [{ role: User, content: "hi" }],
+    wire_messages: None,
     temperature: 0.0,
     max_tokens: 8,
     stream: false,
@@ -106,6 +107,7 @@ test "requests encode tool definitions and provider-neutral tool messages" {
         content: "{\"tool_call_id\":\"call-1\",\"name\":\"create_todo\",\"content\":\"{\\\"id\\\":1}\"}",
       },
     ],
+    wire_messages: None,
     temperature: 0.0,
     max_tokens: 8,
     stream: true,
@@ -120,6 +122,37 @@ test "requests encode tool definitions and provider-neutral tool messages" {
   let encoded = request_json(request).stringify()
   assert_true(encoded.contains("tool_call_id"))
   assert_true(encoded.contains("parameters"))
+}
+
+///|
+test "request wire override keeps provider projection ephemeral" {
+  let request : ChatRequest = {
+    model: "fake",
+    messages: [{ role: User, content: "Describe this [Image]" }],
+    wire_messages: Some([
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "Describe this" },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,cG5n",
+              "detail": "auto",
+            },
+          },
+        ],
+      },
+    ]),
+    temperature: 0.0,
+    max_tokens: 8,
+    stream: true,
+    tools: [],
+  }
+  let encoded = request_json(request).stringify()
+  assert_true(encoded.contains("image_url"))
+  assert_true(encoded.contains("data:image/png;base64,cG5n"))
+  assert_false(encoded.contains("Describe this [Image]"))
 }
 
 ///|
@@ -252,6 +285,7 @@ async test "HTTP connector accepts text and redacts provider failures" {
     let request : ChatRequest = {
       model: "fake",
       messages: [{ role: User, content: "hi" }],
+      wire_messages: None,
       temperature: 0.0,
       max_tokens: 8,
       stream: true,

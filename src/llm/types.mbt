@@ -16,6 +16,7 @@ pub(all) struct ChatMessage {
 pub(all) struct ChatRequest {
   model : String
   messages : Array[ChatMessage]
+  wire_messages : Array[Json]?
   temperature : Double
   max_tokens : Int
   stream : Bool

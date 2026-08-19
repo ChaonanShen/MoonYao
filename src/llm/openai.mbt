@@ -38,8 +38,17 @@ fn wire_message(message : ChatMessage) -> Json {
 }
 
 ///|
+/// Encode legacy runtime messages for a request-level canonical override.
+pub fn chat_messages_json(messages : Array[ChatMessage]) -> Array[Json] {
+  messages.map(wire_message)
+}
+
+///|
 pub fn request_json(request : ChatRequest) -> Json {
-  let messages : Array[Json] = request.messages.map(wire_message)
+  let messages : Array[Json] = match request.wire_messages {
+    Some(values) => values
+    None => request.messages.map(wire_message)
+  }
   let result : Map[String, Json] = {
     "model": request.model,
     "messages": messages,

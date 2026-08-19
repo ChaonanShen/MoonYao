@@ -483,7 +483,8 @@ async fn run_http_turn(
   application : @app.Application,
   database : @sqlite3.Connection,
   chat_id : String,
-  content : String,
+  content : @moonhttp.TurnInput,
+  attachment_root : String,
   stream : Bool,
   connection : @asynchttp.ServerConnection,
   id : String,
@@ -536,7 +537,7 @@ async fn run_http_turn(
       @conversation.rename_chat(
         database,
         chat_id,
-        title_for_http(content),
+        title_for_http(content.preview),
         @env.now().reinterpret_as_int64(),
       ) {
       Err(error) => {
@@ -551,19 +552,64 @@ async fn run_http_turn(
     application.flows,
     application.globals,
   )
+  let wire_message : Json? = if content.canonical {
+    match
+      @llm.project_messages([content.message], attachment_id => {
+        let metadata = match @attachment.get(database, attachment_id) {
+          Ok(value) => value
+          Err(error) => return Err(error)
+        }
+        let data = match @attachment.read_local(attachment_root, metadata) {
+          Ok(value) => value
+          Err(error) => return Err(error)
+        }
+        Ok({
+          id: metadata.id,
+          filename: metadata.filename,
+          media_type: metadata.media_type,
+          data,
+        })
+      }) {
+      Ok(values) => Some(values[0])
+      Err(error) => {
+        send_platform_error(connection, error, id)
+        return
+      }
+    }
+  } else {
+    None
+  }
   if !stream {
-    let result = @agent.run_turn(
-      database,
-      selected,
-      connector,
-      @agent.OpenAI(connector, api_key),
-      Some(chat_id),
-      content,
-      ids,
-      @env.now().reinterpret_as_int64(),
-      (process, input) => registry.run(database, process, input),
-      _ => (),
-    )
+    let result = match wire_message {
+      Some(wire) =>
+        @agent.run_turn_message(
+          database,
+          selected,
+          connector,
+          @agent.OpenAI(connector, api_key),
+          Some(chat_id),
+          content.message,
+          content.preview,
+          wire,
+          ids,
+          @env.now().reinterpret_as_int64(),
+          (process, input) => registry.run(database, process, input),
+          _ => (),
+        )
+      None =>
+        @agent.run_turn(
+          database,
+          selected,
+          connector,
+          @agent.OpenAI(connector, api_key),
+          Some(chat_id),
+          content.preview,
+          ids,
+          @env.now().reinterpret_as_int64(),
+          (process, input) => registry.run(database, process, input),
+          _ => (),
+        )
+    }
     match result {
       Err(error) => send_platform_error(connection, error, id)
       Ok(value) => {
@@ -659,36 +705,55 @@ async fn run_http_turn(
         }
       }
     }
-    let result = @agent.run_turn(
-      database,
-      selected,
-      connector,
-      @agent.OpenAI(connector, api_key),
-      Some(chat_id),
-      content,
-      ids,
-      @env.now().reinterpret_as_int64(),
-      (process, input) => registry.run(database, process, input),
-      event => {
-        match
-          @moonhttp.public_event(
-            event,
-            sequence + 1,
-            chat_id,
-            ids.turn_id,
-            ids.assistant_message_id,
-          ) {
-          Some((name, data)) => {
-            sequence = sequence + 1
-            if name == "turn.failed" {
-              terminal = true
-            }
-            frames.push(@moonhttp.sse_frame(sequence, name, data))
+    let event_sink = fn(event : @llm.CompletionEvent) -> Unit {
+      match
+        @moonhttp.public_event(
+          event,
+          sequence + 1,
+          chat_id,
+          ids.turn_id,
+          ids.assistant_message_id,
+        ) {
+        Some((name, data)) => {
+          sequence = sequence + 1
+          if name == "turn.failed" {
+            terminal = true
           }
-          None => ()
+          frames.push(@moonhttp.sse_frame(sequence, name, data))
         }
-      },
-    )
+        None => ()
+      }
+    }
+    let result = match wire_message {
+      Some(wire) =>
+        @agent.run_turn_message(
+          database,
+          selected,
+          connector,
+          @agent.OpenAI(connector, api_key),
+          Some(chat_id),
+          content.message,
+          content.preview,
+          wire,
+          ids,
+          @env.now().reinterpret_as_int64(),
+          (process, input) => registry.run(database, process, input),
+          event_sink,
+        )
+      None =>
+        @agent.run_turn(
+          database,
+          selected,
+          connector,
+          @agent.OpenAI(connector, api_key),
+          Some(chat_id),
+          content.preview,
+          ids,
+          @env.now().reinterpret_as_int64(),
+          (process, input) => registry.run(database, process, input),
+          event_sink,
+        )
+    }
     match result {
       Ok(value) => {
         sequence = sequence + 1
@@ -757,6 +822,8 @@ async fn serve_command(app_dir : String) -> Unit {
     Err(error) => abort(error.to_json().stringify())
   }
   let path = database_path(app_dir, application.database)
+  let data_root = app_dir + "/data"
+  let attachments_root = data_root + "/attachments"
   if !@fs.path_exists(path) {
     abort(
       @errors.database_error(
@@ -774,7 +841,7 @@ async fn serve_command(app_dir : String) -> Unit {
       _ => ""
     }
     let parsed : Result[Json, @errors.EngineError] = if body_source.length() >
-      1048576 {
+      15000000 {
       Err(@errors.invalid_argument("request body is too large", "body"))
     } else if request.meth == @asynchttp.Post ||
       request.meth == @asynchttp.Patch {
@@ -855,13 +922,107 @@ async fn serve_command(app_dir : String) -> Unit {
         ignore(@sqlite.close_result(database))
         send_platform_response(connection, response, id)
       }
+      Ok(
+        Some(
+          @moonhttp.UploadAttachment(filename, media_type, data, attachment_id)
+        )
+      ) => {
+        let kind = match @attachment.classify(data, media_type) {
+          Ok(value) => value
+          Err(error) => {
+            ignore(@sqlite.close_result(database))
+            send_platform_error(connection, error, id)
+            return
+          }
+        }
+        if !@fs.path_exists(data_root) {
+          @fs.create_dir(data_root) catch {
+            _ => {
+              ignore(@sqlite.close_result(database))
+              send_platform_error(
+                connection,
+                @errors.internal_error(
+                  "could not create data directory", "attachment",
+                ),
+                id,
+              )
+              return
+            }
+          }
+        }
+        if !@fs.path_exists(attachments_root) {
+          @fs.create_dir(attachments_root) catch {
+            _ => {
+              ignore(@sqlite.close_result(database))
+              send_platform_error(
+                connection,
+                @errors.internal_error(
+                  "could not create attachment directory", "attachment",
+                ),
+                id,
+              )
+              return
+            }
+          }
+        }
+        let storage_key = match @attachment.storage_key(attachment_id) {
+          Ok(value) => value
+          Err(error) => {
+            ignore(@sqlite.close_result(database))
+            send_platform_error(connection, error, id)
+            return
+          }
+        }
+        let value : @attachment.Attachment = {
+          id: attachment_id,
+          storage_key,
+          filename,
+          media_type,
+          byte_size: data.length(),
+          sha256: @attachment.digest(data),
+          kind,
+          status: "ready",
+          created_at: @env.now().reinterpret_as_int64(),
+          deleted_at: 0,
+        }
+        match @attachment.write_local(attachments_root, value, data) {
+          Err(error) => {
+            ignore(@sqlite.close_result(database))
+            send_platform_error(connection, error, id)
+          }
+          Ok(_) =>
+            match @attachment.insert(database, value) {
+              Err(error) => {
+                @fs.remove_file(attachments_root + "/" + storage_key) catch {
+                  _ => ()
+                }
+                ignore(@sqlite.close_result(database))
+                send_platform_error(connection, error, id)
+              }
+              Ok(_) => {
+                ignore(@sqlite.close_result(database))
+                send_platform_response(
+                  connection,
+                  {
+                    status: 201,
+                    content_type: "application/json; charset=utf-8",
+                    body: @moonhttp.success(@moonhttp.attachment_json(value)).stringify(),
+                    location: "",
+                  },
+                  id,
+                )
+              }
+            }
+        }
+      }
       Ok(Some(@moonhttp.Turn(chat_id, content))) => {
         let stream = match request.headers.get("accept") {
           Some(value) => value.contains("text/event-stream")
           None => false
         }
         run_http_turn(
-          application, database, chat_id, content, stream, connection, id,
+          application, database, chat_id, content, attachments_root, stream, connection,
+          id,
         )
         ignore(@sqlite.close_result(database))
       }

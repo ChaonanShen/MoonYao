@@ -26,6 +26,113 @@ fn attachment_ids(message : @content.Message) -> Array[String] {
 }
 
 ///|
+/// Replace the compatibility user row created by begin_turn with canonical input.
+pub fn replace_canonical_message(
+  connection : @sqlite3.Connection,
+  id : String,
+  message : @content.Message,
+) -> Result[Unit, @errors.EngineError] {
+  if message.role != @content.User {
+    return Err(
+      @errors.invalid_argument("current message must be user", "message"),
+    )
+  }
+  let payload = @content.encode(message).stringify()
+  if payload.length() > 262144 {
+    return Err(
+      @errors.invalid_argument("canonical message is too large", "message"),
+    )
+  }
+  let ids = attachment_ids(message)
+  if ids.length() > 8 {
+    return Err(
+      @errors.invalid_argument(
+        "too many message attachments", "message.content",
+      ),
+    )
+  }
+  for attachment_id in ids {
+    match @attachment.get(connection, attachment_id) {
+      Err(error) => return Err(error)
+      Ok(_) => ()
+    }
+  }
+  match exec(connection, "BEGIN IMMEDIATE", "message.replace") {
+    Err(error) => return Err(error)
+    Ok(_) => ()
+  }
+  let update = connection.prepare(
+    "UPDATE _moonyao_messages SET kind = 'multipart', content_json = ?, canonical_json = ? WHERE id = ? AND role = 'user'",
+  ) catch {
+    _ => {
+      rollback(connection)
+      return Err(
+        @errors.database_error(
+          "could not prepare canonical replacement", "message",
+        ),
+      )
+    }
+  }
+  try {
+    update.bind(index=1, payload)
+    update.bind(index=2, payload)
+    update.bind(index=3, id)
+    update.step_once()
+    update.finalize()
+  } catch {
+    _ => {
+      update.finalize() catch {
+        _ => ()
+      }
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not replace canonical message", "message"),
+      )
+    }
+  }
+  for index = 0; index < ids.length(); index = index + 1 {
+    let reference = connection.prepare(
+      "INSERT INTO _moonyao_message_attachments(message_id, attachment_id, position) VALUES (?, ?, ?)",
+    ) catch {
+      _ => {
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not prepare attachment references", "message",
+          ),
+        )
+      }
+    }
+    try {
+      reference.bind(index=1, id)
+      reference.bind(index=2, ids[index])
+      reference.bind(index=3, index)
+      reference.step_once()
+      reference.finalize()
+    } catch {
+      _ => {
+        reference.finalize() catch {
+          _ => ()
+        }
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not save attachment references", "message",
+          ),
+        )
+      }
+    }
+  }
+  match exec(connection, "COMMIT", "message.replace") {
+    Ok(_) => Ok(())
+    Err(error) => {
+      rollback(connection)
+      Err(error)
+    }
+  }
+}
+
+///|
 pub fn append_canonical(
   connection : @sqlite3.Connection,
   id : String,

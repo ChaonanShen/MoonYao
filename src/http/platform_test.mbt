@@ -515,18 +515,26 @@ test "embedded CUI uses safe DOM rendering and no external build chain" {
   assert_true(agent_css.contains("@media"))
   assert_true(agent_js.contains("textContent"))
   assert_false(agent_js.contains("innerHTML"))
-  assert_true(
-    agent_js.contains(
-      "catch(error){await openChat(state.chatId).catch(()=>{});showError(error)}",
-    ),
-  )
   assert_true(agent_js.contains("event.key===\"Enter\"&&!event.shiftKey"))
   assert_true(agent_js.contains("!event.isComposing"))
   assert_true(agent_js.contains("requestSubmit()"))
   assert_true(agent_html.contains("attachment-input"))
+  assert_true(agent_html.contains("cancel-turn"))
+  assert_true(agent_html.contains("retry-turn"))
   assert_true(agent_js.contains("/v1/attachments"))
   assert_true(agent_js.contains("data_base64"))
   assert_true(agent_js.contains("const message={role:\"user\",content:parts}"))
+  assert_true(agent_js.contains("Idempotency-Key"))
+  assert_true(agent_js.contains("/events?after=${state.lastSequence}"))
+  assert_true(agent_js.contains("sequence<=state.lastSequence"))
+  assert_true(agent_js.contains("error.status&&error.status<500"))
+  assert_true(
+    agent_js.contains("state.activeTurnId=turnId;setBusy(true,\"Running\")"),
+  )
+  assert_true(agent_js.contains("/cancel"))
+  assert_true(agent_js.contains("/retry"))
+  assert_true(agent_js.contains("Retry may repeat Process side effects"))
+  assert_true(agent_js.contains("files.length>8"))
   assert_false(agent_html.contains("https://"))
   assert_false(agent_js.contains("https://"))
 }

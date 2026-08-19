@@ -28,3 +28,13 @@
   截断并保持 API 排序稳定。
 - 独立的 `example/todo-agent` 主发布示例，以及覆盖 429、500、timeout、malformed、disconnect、
   20 次顺序 turn 和不同 chat 并发运行的离线验收。
+- provider-neutral canonical message 与 image/file attachment 模型；包含受限本地存储、完整性
+  摘要、引用持久化、provider-boundary multimodal 投影和旧 text history migration。
+- 完整 Context/Create/Next turn lifecycle：有界 context snapshot、严格 hook decisions、状态迁移、
+  tool result 汇总和自定义 Next terminal data。
+- turn deadline、显式 cancel、provider retry/backoff cancellation、同步 Process cancellation
+  pending、终态 CAS 和 completion/cancellation race 防护。
+- 持久化 turn event journal、`turn_id:sequence` SSE cursor、JSON/SSE replay、幂等 turn 创建、
+  retry root/attempt 和 startup interruption recovery。
+- Web CUI active-turn 自动恢复、POST 断线续传、事件去重、cancel/retry controls、幂等提交键和
+  desktop/mobile 终态展示。

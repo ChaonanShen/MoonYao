@@ -885,13 +885,50 @@ pub fn fail_turn(
   message : String,
   now : Int64,
 ) -> Result[Unit, @errors.EngineError] {
+  match exec(connection, "BEGIN IMMEDIATE", "turn.fail") {
+    Err(error) => return Err(error)
+    Ok(_) => ()
+  }
+  let active = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_turns WHERE id = ? AND status = 'active'",
+  ) catch {
+    _ => {
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not inspect active turn", "turn"),
+      )
+    }
+  }
+  let active_count = try {
+    active.bind(index=1, turn_id)
+    ignore(active.step())
+    let value : Int = active.column(index=0)
+    active.finalize()
+    value
+  } catch {
+    _ => {
+      active.finalize() catch {
+        _ => ()
+      }
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not inspect active turn", "turn"),
+      )
+    }
+  }
+  if active_count != 1 {
+    rollback(connection)
+    return Err(@errors.turn_conflict())
+  }
   let statement = connection.prepare(
     "UPDATE _moonyao_turns SET status = 'failed', error_code = ?, error_message = ?, finished_at = ? WHERE id = ? AND status = 'active'",
   ) catch {
-    _ =>
+    _ => {
+      rollback(connection)
       return Err(
         @errors.database_error("could not prepare turn failure", "turn"),
       )
+    }
   }
   try {
     statement.bind(index=1, code)
@@ -900,13 +937,20 @@ pub fn fail_turn(
     statement.bind(index=4, turn_id)
     statement.step_once()
     statement.finalize()
-    Ok(())
   } catch {
     _ => {
       statement.finalize() catch {
         _ => ()
       }
-      Err(@errors.database_error("could not fail turn", "turn"))
+      rollback(connection)
+      return Err(@errors.database_error("could not fail turn", "turn"))
+    }
+  }
+  match exec(connection, "COMMIT", "turn.fail") {
+    Ok(_) => Ok(())
+    Err(error) => {
+      rollback(connection)
+      Err(error)
     }
   }
 }

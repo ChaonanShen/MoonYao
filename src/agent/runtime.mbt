@@ -197,23 +197,15 @@ fn title_for(content : String) -> String {
 
 ///|
 fn fail_active_turn(
-  connection : @sqlite3.Connection,
-  turn_id : String,
+  runtime : TurnRuntimeContext,
+  assistant_message_id : String,
   error : @errors.EngineError,
   now : Int64,
-  sink : (@llm.CompletionEvent) -> Unit,
 ) -> @errors.EngineError {
-  ignore(
-    @conversation.fail_turn(
-      connection,
-      turn_id,
-      error.code.as_string(),
-      error.message,
-      now,
-    ),
-  )
-  sink(@llm.Failed(error.code.as_string()))
-  error
+  match finalize_turn(runtime, assistant_message_id, Failed(error), now) {
+    Err(terminal) => terminal
+    Ok(_) => error
+  }
 }
 
 ///|
@@ -522,6 +514,23 @@ async fn run_turn_inner(
       ids.chat_id
     }
   }
+  let snapshot = match
+    context_snapshot(
+      "ctx_" + ids.turn_id,
+      "req_" + ids.turn_id,
+      chat_id,
+      ids.turn_id,
+      agent.id,
+      connector.id,
+      Json::object(Map([])),
+      started_at,
+      started_at + 300000,
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let runtime : TurnRuntimeContext = { snapshot, connection, invoke, sink }
+  let mut lifecycle = begin_lifecycle(snapshot)
   match
     @conversation.begin_turn(
       connection,
@@ -534,6 +543,7 @@ async fn run_turn_inner(
     Ok(_) => ()
     Err(error) => return Err(error)
   }
+  lifecycle = lifecycle.advance(Begun).unwrap()
   match canonical_current {
     Some((message, _)) =>
       match
@@ -545,7 +555,7 @@ async fn run_turn_inner(
         Ok(_) => ()
         Err(error) =>
           return Err(
-            fail_active_turn(connection, ids.turn_id, error, now, sink),
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
       }
     None => ()
@@ -553,21 +563,29 @@ async fn run_turn_inner(
   let stored = match @conversation.completed_messages(connection, chat_id) {
     Ok(value) => value
     Err(error) =>
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
   }
   let history = match build_history(agent.prompts, stored, input) {
     Ok(value) => value
     Err(error) =>
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
   }
+  lifecycle = lifecycle.advance(HistoryLoaded).unwrap()
   let messages = history.messages.copy()
   let canonical_index = messages.length() - 1
   let mut metadata : Json = Json::object(Map([]))
   let all_events : Array[@llm.CompletionEvent] = []
+  lifecycle = lifecycle.advance(Creating).unwrap()
   if agent.before_process.length() > 0 {
-    if @env.now().reinterpret_as_int64() - started_at > 300000 {
+    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
       let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
     }
     let started = @llm.HookStarted("before")
     sink(started)
@@ -576,6 +594,7 @@ async fn run_turn_inner(
       "agent_id": agent.id,
       "chat_id": chat_id,
       "turn_id": ids.turn_id,
+      "context": context_json(snapshot),
       "messages": hook_messages_json(messages),
       "input": { "content": input },
       "metadata": metadata,
@@ -583,21 +602,29 @@ async fn run_turn_inner(
     let output = match invoke(agent.before_process, hook_input) {
       Ok(value) => value
       Err(error) =>
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
     }
-    if @env.now().reinterpret_as_int64() - started_at > 300000 {
+    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
       let error = @errors.turn_limit_exceeded(
         "turn deadline exceeded after before hook",
       )
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
     }
     guard output is Object(object) else {
       let error = @errors.tool_error("before hook must return an object")
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
     }
     match known_hook_keys(object, ["messages", "metadata"], "before") {
       Err(error) =>
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
       Ok(_) => ()
     }
     let updated = match object.get("messages") {
@@ -605,11 +632,15 @@ async fn run_turn_inner(
         match parse_hook_messages(value, "before.messages") {
           Ok(v) => v
           Err(e) =>
-            return Err(fail_active_turn(connection, ids.turn_id, e, now, sink))
+            return Err(
+              fail_active_turn(runtime, ids.assistant_message_id, e, now),
+            )
         }
       None => {
         let error = @errors.tool_error("before hook omitted messages")
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
       }
     }
     metadata = match object.get("metadata") {
@@ -618,7 +649,7 @@ async fn run_turn_inner(
         if json.stringify().length() > 32768 {
           let error = @errors.tool_error("hook metadata is too large")
           return Err(
-            fail_active_turn(connection, ids.turn_id, error, now, sink),
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
         }
         json
@@ -626,7 +657,9 @@ async fn run_turn_inner(
       None => Json::object(Map([]))
       Some(_) => {
         let error = @errors.tool_error("hook metadata must be an object")
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
       }
     }
     messages.clear()
@@ -637,6 +670,7 @@ async fn run_turn_inner(
     sink(completed)
     all_events.push(completed)
   }
+  lifecycle = lifecycle.advance(Running).unwrap()
   let definitions = tool_definitions(agent)
   let mut round = 0
   let mut tool_count = 0
@@ -644,9 +678,11 @@ async fn run_turn_inner(
   let mut prompt_tokens = 0
   let mut completion_tokens = 0
   while round < 8 {
-    if @env.now().reinterpret_as_int64() - started_at > 300000 {
+    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
       let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
     }
     let request : @llm.ChatRequest = {
       model: connector.model,
@@ -673,7 +709,9 @@ async fn run_turn_inner(
       ) {
       Ok(value) => value
       Err(error) =>
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
     }
     round = round + 1
     let (events, content, usage) = completed
@@ -690,7 +728,9 @@ async fn run_turn_inner(
     if !calls.is_empty() {
       if tool_count + calls.length() > 32 {
         let error = @errors.turn_limit_exceeded("tool-call limit exceeded")
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
       }
       let assistant_json = assistant_tool_message(content, calls)
       match
@@ -706,7 +746,7 @@ async fn run_turn_inner(
         ) {
         Err(error) =>
           return Err(
-            fail_active_turn(connection, ids.turn_id, error, now, sink),
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
         Ok(_) => ()
       }
@@ -724,7 +764,7 @@ async fn run_turn_inner(
               "model requested a tool outside the allowlist",
             )
             return Err(
-              fail_active_turn(connection, ids.turn_id, error, now, sink),
+              fail_active_turn(runtime, ids.assistant_message_id, error, now),
             )
           }
         }
@@ -747,7 +787,7 @@ async fn run_turn_inner(
             match validate_arguments(value, tool.input_schema) {
               Err(error) => Err(error)
               Ok(_) =>
-                if @env.now().reinterpret_as_int64() - started_at > 300000 {
+                if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
                   Err(
                     @errors.turn_limit_exceeded(
                       "turn deadline exceeded before tool execution",
@@ -755,7 +795,7 @@ async fn run_turn_inner(
                   )
                 } else {
                   let result = invoke(tool.process, value)
-                  if @env.now().reinterpret_as_int64() - started_at > 300000 {
+                  if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
                     Err(
                       @errors.turn_limit_exceeded(
                         "turn deadline exceeded after tool execution",
@@ -805,7 +845,7 @@ async fn run_turn_inner(
           ) {
           Err(error) =>
             return Err(
-              fail_active_turn(connection, ids.turn_id, error, now, sink),
+              fail_active_turn(runtime, ids.assistant_message_id, error, now),
             )
           Ok(_) => ()
         }
@@ -823,7 +863,7 @@ async fn run_turn_inner(
             "tool execution could not continue safely",
           )
           return Err(
-            fail_active_turn(connection, ids.turn_id, error, now, sink),
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
         }
       }
@@ -831,13 +871,17 @@ async fn run_turn_inner(
     }
     if content.length() == 0 {
       let error = @errors.llm_error("model returned empty text")
-      return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
     }
     let mut final_content = content
     if agent.after_process.length() > 0 {
-      if @env.now().reinterpret_as_int64() - started_at > 300000 {
+      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
         let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
       }
       let started = @llm.HookStarted("after")
       sink(started)
@@ -846,6 +890,7 @@ async fn run_turn_inner(
         "agent_id": agent.id,
         "chat_id": chat_id,
         "turn_id": ids.turn_id,
+        "context": context_json(snapshot),
         "completion": { "content": content },
         "metadata": metadata,
       }
@@ -853,20 +898,22 @@ async fn run_turn_inner(
         Ok(value) => value
         Err(error) =>
           return Err(
-            fail_active_turn(connection, ids.turn_id, error, now, sink),
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
       }
-      if @env.now().reinterpret_as_int64() - started_at > 300000 {
+      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
         let error = @errors.turn_limit_exceeded(
           "turn deadline exceeded after after hook",
         )
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
       }
       let action = match parse_after(output) {
         Ok(value) => value
         Err(error) =>
           return Err(
-            fail_active_turn(connection, ids.turn_id, error, now, sink),
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
       }
       let completed = @llm.HookCompleted("after")
@@ -881,7 +928,7 @@ async fn run_turn_inner(
               "after-hook continuation limit exceeded",
             )
             return Err(
-              fail_active_turn(connection, ids.turn_id, error, now, sink),
+              fail_active_turn(runtime, ids.assistant_message_id, error, now),
             )
           }
           let internal : Json = { "messages": hook_messages_json(extra) }
@@ -898,7 +945,7 @@ async fn run_turn_inner(
             ) {
             Err(error) =>
               return Err(
-                fail_active_turn(connection, ids.turn_id, error, now, sink),
+                fail_active_turn(runtime, ids.assistant_message_id, error, now),
               )
             Ok(_) => ()
           }
@@ -910,19 +957,18 @@ async fn run_turn_inner(
         }
       }
     }
+    lifecycle = lifecycle.advance(Next).unwrap()
     let total_usage : @llm.Usage = { prompt_tokens, completion_tokens }
+    lifecycle = lifecycle.advance(Finalizing).unwrap()
     match
-      @conversation.complete_turn(
-        connection,
+      finalize_turn(
+        runtime,
         ids.assistant_message_id,
-        chat_id,
-        ids.turn_id,
-        final_content,
-        total_usage,
+        Completed(final_content, total_usage),
         now,
       ) {
       Ok(_) => {
-        sink(@llm.Completed)
+        lifecycle = lifecycle.advance(Terminal).unwrap()
         return Ok({
           chat_id,
           turn_id: ids.turn_id,
@@ -932,10 +978,9 @@ async fn run_turn_inner(
           usage: total_usage,
         })
       }
-      Err(error) =>
-        return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+      Err(error) => return Err(error)
     }
   }
   let error = @errors.turn_limit_exceeded("LLM round limit exceeded")
-  Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
+  Err(fail_active_turn(runtime, ids.assistant_message_id, error, now))
 }

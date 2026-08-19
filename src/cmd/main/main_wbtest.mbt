@@ -189,16 +189,23 @@ async test "HTTP turns stream public events and persist completion" {
       @conversation.create_chat(database, "stream-chat", "todo", "Stream", 1),
     )
     ignore(@conversation.create_chat(database, "json-chat", "todo", "JSON", 1))
+    ignore(
+      @conversation.create_chat(
+        database, "disconnect-chat", "todo", "Disconnect", 1,
+      ),
+    )
     let platform = @asynchttp.Server(@socket.Addr::parse("127.0.0.1:0"))
     group.spawn_bg(no_wait=true) <| () => {
       platform.run_forever(allow_failure=true) <| ((request, body, connection) => {
         ignore(body.read_all())
-        let stream = request.path == "/stream"
+        let stream = request.path != "/json"
         run_http_turn(
           application,
           database,
-          if stream {
+          if request.path == "/stream" {
             "stream-chat"
+          } else if request.path == "/disconnect" {
+            "disconnect-chat"
           } else {
             "json-chat"
           },
@@ -207,6 +214,8 @@ async test "HTTP turns stream public events and persist completion" {
           stream,
           connection,
           "turn-request",
+          @agent.TurnSupervisor::new(),
+          group,
         )
       })
     }
@@ -236,6 +245,21 @@ async test "HTTP turns stream public events and persist completion" {
     assert_eq(json_response.code, 200)
     assert_true(json_body.text().contains("\"content\":\"hello\""))
     assert_true(json_body.text().contains("\"next\":null"))
+    let disconnected = @socket.Tcp::connect(platform.addr)
+    disconnected.write(
+      "POST /disconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )
+    @async.sleep(10)
+    disconnected.close()
+    @async.sleep(100)
+    match @conversation.active_turn_id(database, "disconnect-chat") {
+      Ok(value) => assert_eq(value, "")
+      Err(error) => fail(error.message)
+    }
+    match @conversation.completed_messages(database, "disconnect-chat") {
+      Ok(messages) => assert_eq(messages.length(), 2)
+      Err(error) => fail(error.message)
+    }
     match @conversation.active_turn_id(database, "stream-chat") {
       Ok(value) => assert_eq(value, "")
       Err(error) => fail(error.message)

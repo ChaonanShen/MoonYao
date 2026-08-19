@@ -49,6 +49,9 @@ pub(all) struct TurnLifecycle {
 pub(all) enum TurnOutcome {
   Completed(String, @llm.Usage)
   Failed(@errors.EngineError)
+  Cancelled
+  TimedOut
+  Interrupted
 } derive(Debug)
 
 ///|
@@ -225,5 +228,53 @@ pub fn finalize_turn(
         }
         Err(persist_error) => Err(persist_error)
       }
+    Cancelled => {
+      let error = @errors.turn_cancelled()
+      match
+        @conversation.cancel_turn(
+          runtime.connection,
+          runtime.snapshot.turn_id,
+          now,
+        ) {
+        Ok(true) => {
+          (runtime.sink)(@llm.Cancelled)
+          Err(error)
+        }
+        Ok(false) => Err(@errors.turn_conflict())
+        Err(persist_error) => Err(persist_error)
+      }
+    }
+    TimedOut => {
+      let error = @errors.turn_timed_out()
+      match
+        @conversation.timeout_turn(
+          runtime.connection,
+          runtime.snapshot.turn_id,
+          now,
+        ) {
+        Ok(true) => {
+          (runtime.sink)(@llm.TimedOut)
+          Err(error)
+        }
+        Ok(false) => Err(@errors.turn_conflict())
+        Err(persist_error) => Err(persist_error)
+      }
+    }
+    Interrupted => {
+      let error = @errors.turn_interrupted()
+      match
+        @conversation.interrupt_turn(
+          runtime.connection,
+          runtime.snapshot.turn_id,
+          now,
+        ) {
+        Ok(true) => {
+          (runtime.sink)(@llm.Interrupted)
+          Err(error)
+        }
+        Ok(false) => Err(@errors.turn_conflict())
+        Err(persist_error) => Err(persist_error)
+      }
+    }
   }
 }

@@ -19,6 +19,9 @@ pub fn status_code(error : @errors.EngineError) -> Int {
     @errors.AgentNotFound | @errors.ChatNotFound | @errors.RouteNotFound => 404
     @errors.MethodNotAllowed => 405
     @errors.TurnConflict => 409
+    @errors.TurnCancelled => 409
+    @errors.TurnTimedOut => 504
+    @errors.TurnInterrupted => 503
     @errors.TurnLimitExceeded => 422
     @errors.LlmError => 502
     @errors.ToolError | @errors.DatabaseError | @errors.InternalError => 500
@@ -68,6 +71,8 @@ pub fn turn_json(turn : @conversation.Turn) -> Json {
     "status": turn.status,
     "prompt_tokens": turn.prompt_tokens,
     "completion_tokens": turn.completion_tokens,
+    "cancel_requested_at": Json::number(turn.cancel_requested_at.to_double()),
+    "deadline_at": Json::number(turn.deadline_at.to_double()),
     "started_at": Json::number(turn.started_at.to_double()),
     "finished_at": Json::number(turn.finished_at.to_double()),
   }
@@ -253,6 +258,8 @@ pub(all) struct TurnInput {
   preview : String
   message : @content.Message
   canonical : Bool
+  timeout_ms : Int
+  metadata : Json
 } derive(Eq, Debug)
 
 ///|
@@ -277,9 +284,53 @@ fn message_preview(message : @content.Message) -> String {
 
 ///|
 pub fn turn_input(value : Json) -> Result[TurnInput, @errors.EngineError] {
-  let object = match strict_object(value, ["content", "message"], "body") {
+  let object = match
+    strict_object(value, ["content", "message", "options"], "body") {
     Ok(v) => v
     Err(e) => return Err(e)
+  }
+  let (timeout_ms, metadata) = match object.get("options") {
+    None => (300000, Json::object(Map([])))
+    Some(raw) => {
+      let options = match
+        strict_object(raw, ["timeout_ms", "metadata"], "body.options") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      let timeout_ms = match options.get("timeout_ms") {
+        None => 300000
+        Some(Number(value, ..)) if value.to_int().to_double() == value &&
+          value >= 1000.0 &&
+          value <= 300000.0 => value.to_int()
+        _ =>
+          return Err(
+            @errors.invalid_argument(
+              "timeout_ms must be an integer between 1000 and 300000", "body.options.timeout_ms",
+            ),
+          )
+      }
+      let metadata = match options.get("metadata") {
+        None => Json::object(Map([]))
+        Some(Object(value)) => {
+          let encoded = Json::object(value)
+          if encoded.stringify().length() > 32768 {
+            return Err(
+              @errors.invalid_argument(
+                "metadata is too large", "body.options.metadata",
+              ),
+            )
+          }
+          encoded
+        }
+        Some(_) =>
+          return Err(
+            @errors.invalid_argument(
+              "metadata must be an object", "body.options.metadata",
+            ),
+          )
+      }
+      (timeout_ms, metadata)
+    }
   }
   match (object.get("content"), object.get("message")) {
     (Some(String(text)), None) if text.length() >= 1 &&
@@ -288,6 +339,8 @@ pub fn turn_input(value : Json) -> Result[TurnInput, @errors.EngineError] {
         preview: text,
         message: @content.text_message(@content.User, text),
         canonical: false,
+        timeout_ms,
+        metadata,
       })
     (None, Some(raw)) => {
       let message = match @content.decode(raw, "body.message") {
@@ -309,7 +362,7 @@ pub fn turn_input(value : Json) -> Result[TurnInput, @errors.EngineError] {
           ),
         )
       }
-      Ok({ preview, message, canonical: true })
+      Ok({ preview, message, canonical: true, timeout_ms, metadata })
     }
     (Some(_), Some(_)) =>
       Err(
@@ -400,6 +453,7 @@ pub(all) struct PlatformResponse {
 pub(all) enum PlatformAction {
   Response(PlatformResponse)
   Turn(String, TurnInput)
+  CancelTurn(String)
   UploadAttachment(String, String, Bytes, String)
 } derive(Debug)
 
@@ -763,6 +817,37 @@ pub fn dispatch_platform(
       }
       Ok(Some(Turn(chat_id, content)))
     }
+    ["v1", "turns", turn_id] => {
+      if verb != "GET" {
+        return Err(@errors.method_not_allowed("GET"))
+      }
+      match pagination(query, []) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      let turn = match @conversation.get_turn(connection, turn_id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
+      Ok(Some(response(200, success(turn_json(turn)))))
+    }
+    ["v1", "turns", turn_id, "cancel"] => {
+      if verb != "POST" {
+        return Err(@errors.method_not_allowed("POST"))
+      }
+      match pagination(query, []) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      match strict_object(body, [], "body") {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      match @conversation.get_turn(connection, turn_id) {
+        Err(error) => return Err(error)
+        Ok(_) => Ok(Some(CancelTurn(turn_id)))
+      }
+    }
     _ => Err(@errors.route_not_found(path))
   }
 }
@@ -835,6 +920,13 @@ pub fn public_event(
     @llm.Failed(code) => {
       base.set("error", { "code": code, "message": "turn failed" })
       Some(("turn.failed", Json::object(base)))
+    }
+    @llm.Cancelled => Some(("turn.cancelled", Json::object(base)))
+    @llm.TimedOut => Some(("turn.timed_out", Json::object(base)))
+    @llm.Interrupted => Some(("turn.interrupted", Json::object(base)))
+    @llm.CancellationPendingProcess(process) => {
+      base.set("process", Json::string(process))
+      Some(("turn.cancellation_pending_process", Json::object(base)))
     }
     @llm.ToolCallStarted(_, _, _)
     | @llm.ToolArgumentsDelta(_, _)

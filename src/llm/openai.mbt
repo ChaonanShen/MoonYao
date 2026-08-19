@@ -785,3 +785,22 @@ pub async fn complete_http(
     retry_sleep,
   )
 }
+
+///|
+pub async fn complete_http_until(
+  connector : Connector,
+  request : ChatRequest,
+  api_key : String,
+  sink : (CompletionEvent) -> Unit,
+  deadline_at : Int64,
+) -> Result[(Array[CompletionEvent], String, Usage), @errors.EngineError] {
+  complete_http_with_retry(
+    connector,
+    request,
+    api_key,
+    sink,
+    default_retry_policy(deadline_at),
+    retry_now,
+    retry_sleep,
+  )
+}

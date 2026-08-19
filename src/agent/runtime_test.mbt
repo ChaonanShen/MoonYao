@@ -727,6 +727,53 @@ fn fake_text_response(content : String) -> FakeResponse {
 }
 
 ///|
+async test "synchronous Process cancellation is reported and discards its result" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let cancellation = TurnCancellation::new()
+  let events : Array[@llm.CompletionEvent] = []
+  match
+    run_turn_controlled(
+      connection,
+      tool_test_agent(),
+      tool_test_connector(),
+      Client::Fake(fake_tool_response("{\"data\":{\"title\":\"cancel me\"}}")),
+      None,
+      "Create and cancel",
+      tool_test_ids("soft-cancel"),
+      1,
+      {
+        cancellation,
+        deadline_at: @env.now().reinterpret_as_int64() + 5000,
+        metadata: {},
+      },
+      (_, _) => {
+        cancellation.request(@env.now().reinterpret_as_int64())
+        Ok(({ "id": 1 } : Json))
+      },
+      event => events.push(event),
+    ) {
+    Err(error) => assert_eq(error.code, @errors.TurnCancelled)
+    Ok(_) => fail("expected soft cancellation")
+  }
+  let turn = @conversation.get_turn(connection, "turnsoft-cancel").unwrap()
+  assert_eq(turn.status, "cancelled")
+  assert_true(
+    events.contains(@llm.CancellationPendingProcess("models.todo.Create")),
+  )
+  assert_eq(events.filter(event => event is @llm.Cancelled).length(), 1)
+  let final_messages = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_messages WHERE turn_id = 'turnsoft-cancel' AND role = 'assistant' AND kind = 'text'",
+  )
+  ignore(final_messages.step())
+  let final_count : Int = final_messages.column(index=0)
+  final_messages.finalize()
+  assert_eq(final_count, 0)
+  connection.close()
+}
+
+///|
 async test "bounded tool loop validates, invokes, and persists transcript" {
   ignore(@async.now())
   let connection = @sqlite3.Connection::open(":memory:")

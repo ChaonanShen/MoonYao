@@ -30,6 +30,8 @@ pub(all) struct Turn {
   error_message : String
   prompt_tokens : Int
   completion_tokens : Int
+  cancel_requested_at : Int64
+  deadline_at : Int64
   started_at : Int64
   finished_at : Int64
 } derive(Eq, Debug)
@@ -138,7 +140,11 @@ pub fn migrate(
   }
   match migrate_v3(connection) {
     Err(error) => Err(error)
-    Ok(_) => migrate_v4(connection)
+    Ok(_) =>
+      match migrate_v4(connection) {
+        Err(error) => Err(error)
+        Ok(_) => migrate_v5(connection)
+      }
   }
 }
 
@@ -277,7 +283,7 @@ pub fn recover_active(
     }
   }
   let statement = connection.prepare(
-    "UPDATE _moonyao_turns SET status = 'interrupted', error_code = 'interrupted', error_message = 'turn was interrupted', finished_at = ? WHERE status = 'active'",
+    "UPDATE _moonyao_turns SET status = 'interrupted', error_code = 'turn_interrupted', error_message = 'turn was interrupted', finished_at = ? WHERE status = 'active'",
   ) catch {
     _ =>
       return Err(
@@ -500,7 +506,7 @@ pub fn get_turn(
   id : String,
 ) -> Result[Turn, @errors.EngineError] {
   let statement = connection.prepare(
-    "SELECT id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, started_at, finished_at FROM _moonyao_turns WHERE id = ?",
+    "SELECT id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, cancel_requested_at, deadline_at, started_at, finished_at FROM _moonyao_turns WHERE id = ?",
   ) catch {
     _ =>
       return Err(@errors.database_error("could not prepare turn query", "turn"))
@@ -509,7 +515,7 @@ pub fn get_turn(
     statement.bind(index=1, id)
     if !statement.step() {
       statement.finalize()
-      return Err(@errors.invalid_argument("turn was not found", "turn"))
+      return Err(@errors.record_not_found("turn"))
     }
     let turn : Turn = {
       id: statement.column(index=0),
@@ -519,8 +525,10 @@ pub fn get_turn(
       error_message: statement.column(index=4),
       prompt_tokens: statement.column(index=5),
       completion_tokens: statement.column(index=6),
-      started_at: statement.column(index=7),
-      finished_at: statement.column(index=8),
+      cancel_requested_at: statement.column(index=7),
+      deadline_at: statement.column(index=8),
+      started_at: statement.column(index=9),
+      finished_at: statement.column(index=10),
     }
     statement.finalize()
     Ok(turn)
@@ -613,6 +621,7 @@ pub fn begin_turn(
   chat_id : String,
   content : String,
   now : Int64,
+  deadline_at? : Int64 = 0L,
 ) -> Result[Unit, @errors.EngineError] {
   match get_chat(connection, chat_id) {
     Err(e) => return Err(e)
@@ -651,7 +660,7 @@ pub fn begin_turn(
     }
   }
   let turn = connection.prepare(
-    "INSERT INTO _moonyao_turns(id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, started_at, finished_at) VALUES (?, ?, 'active', '', '', -1, -1, ?, 0)",
+    "INSERT INTO _moonyao_turns(id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, cancel_requested_at, deadline_at, started_at, finished_at) VALUES (?, ?, 'active', '', '', -1, -1, 0, ?, ?, 0)",
   ) catch {
     _ => {
       rollback(connection)
@@ -661,7 +670,8 @@ pub fn begin_turn(
   try {
     turn.bind(index=1, turn_id)
     turn.bind(index=2, chat_id)
-    turn.bind(index=3, now)
+    turn.bind(index=3, deadline_at)
+    turn.bind(index=4, now)
     turn.step_once()
     turn.finalize()
   } catch {
@@ -956,6 +966,148 @@ pub fn fail_turn(
       Err(error)
     }
   }
+}
+
+///|
+pub fn request_turn_cancel(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+  now : Int64,
+) -> Result[Turn, @errors.EngineError] {
+  let statement = connection.prepare(
+    "UPDATE _moonyao_turns SET cancel_requested_at = CASE WHEN cancel_requested_at = 0 THEN ? ELSE cancel_requested_at END WHERE id = ? AND status = 'active'",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not prepare turn cancellation", "turn"),
+      )
+  }
+  try {
+    statement.bind(index=1, now)
+    statement.bind(index=2, turn_id)
+    statement.step_once()
+    statement.finalize()
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      return Err(
+        @errors.database_error("could not request turn cancellation", "turn"),
+      )
+    }
+  }
+  get_turn(connection, turn_id)
+}
+
+///|
+fn control_terminal_turn(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+  status : String,
+  code : String,
+  message : String,
+  now : Int64,
+) -> Result[Bool, @errors.EngineError] {
+  if !["cancelled", "timed_out", "interrupted"].contains(status) {
+    return Err(
+      @errors.invalid_argument("invalid terminal turn state", "turn.status"),
+    )
+  }
+  let statement = connection.prepare(
+    "UPDATE _moonyao_turns SET status = ?, error_code = ?, error_message = ?, finished_at = ? WHERE id = ? AND status = 'active'",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not prepare terminal turn", "turn"),
+      )
+  }
+  try {
+    statement.bind(index=1, status)
+    statement.bind(index=2, code)
+    statement.bind(index=3, message)
+    statement.bind(index=4, now)
+    statement.bind(index=5, turn_id)
+    statement.step_once()
+    statement.finalize()
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      return Err(@errors.database_error("could not finalize turn", "turn"))
+    }
+  }
+  let changes = connection.prepare("SELECT changes()") catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not inspect terminal turn", "turn"),
+      )
+  }
+  try {
+    ignore(changes.step())
+    let count : Int = changes.column(index=0)
+    changes.finalize()
+    Ok(count == 1)
+  } catch {
+    _ => {
+      changes.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not inspect terminal turn", "turn"))
+    }
+  }
+}
+
+///|
+pub fn cancel_turn(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+  now : Int64,
+) -> Result[Bool, @errors.EngineError] {
+  let error = @errors.turn_cancelled()
+  control_terminal_turn(
+    connection,
+    turn_id,
+    "cancelled",
+    error.code.as_string(),
+    error.message,
+    now,
+  )
+}
+
+///|
+pub fn timeout_turn(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+  now : Int64,
+) -> Result[Bool, @errors.EngineError] {
+  let error = @errors.turn_timed_out()
+  control_terminal_turn(
+    connection,
+    turn_id,
+    "timed_out",
+    error.code.as_string(),
+    error.message,
+    now,
+  )
+}
+
+///|
+pub fn interrupt_turn(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+  now : Int64,
+) -> Result[Bool, @errors.EngineError] {
+  let error = @errors.turn_interrupted()
+  control_terminal_turn(
+    connection,
+    turn_id,
+    "interrupted",
+    error.code.as_string(),
+    error.message,
+    now,
+  )
 }
 
 ///|

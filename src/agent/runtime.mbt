@@ -143,6 +143,7 @@ async fn complete(
   request : @llm.ChatRequest,
   sink : (@llm.CompletionEvent) -> Unit,
   round : Int,
+  deadline_at : Int64,
 ) -> Result[
   (Array[@llm.CompletionEvent], String, @llm.Usage),
   @errors.EngineError,
@@ -178,7 +179,7 @@ async fn complete(
       }
     }
     OpenAI(connector, api_key) =>
-      @llm.complete_http(connector, request, api_key, sink)
+      @llm.complete_http_until(connector, request, api_key, sink, deadline_at)
   }
 }
 
@@ -203,10 +204,61 @@ fn fail_active_turn(
   error : @errors.EngineError,
   now : Int64,
 ) -> @errors.EngineError {
-  match finalize_turn(runtime, assistant_message_id, Failed(error), now) {
+  let outcome = match error.code {
+    @errors.TurnCancelled => TurnOutcome::Cancelled
+    @errors.TurnTimedOut => TurnOutcome::TimedOut
+    @errors.TurnInterrupted => TurnOutcome::Interrupted
+    _ => Failed(error)
+  }
+  match finalize_turn(runtime, assistant_message_id, outcome, now) {
     Err(terminal) => terminal
     Ok(_) => error
   }
+}
+
+///|
+fn turn_control_error(
+  execution : TurnExecutionOptions,
+  snapshot : TurnContextSnapshot,
+) -> @errors.EngineError? {
+  if execution.cancellation.is_requested() {
+    Some(@errors.turn_cancelled())
+  } else if @env.now().reinterpret_as_int64() >= snapshot.deadline_at {
+    Some(@errors.turn_timed_out())
+  } else {
+    None
+  }
+}
+
+///|
+fn is_turn_control_error(error : @errors.EngineError) -> Bool {
+  [@errors.TurnCancelled, @errors.TurnTimedOut, @errors.TurnInterrupted].contains(
+    error.code,
+  )
+}
+
+///|
+fn invoke_controlled(
+  execution : TurnExecutionOptions,
+  snapshot : TurnContextSnapshot,
+  process : String,
+  input : Json,
+  invoke : (String, Json) -> Result[Json, @errors.EngineError],
+  sink : (@llm.CompletionEvent) -> Unit,
+) -> Result[Json, @errors.EngineError] {
+  match turn_control_error(execution, snapshot) {
+    Some(error) => return Err(error)
+    None => ()
+  }
+  let result = invoke(process, input)
+  if execution.cancellation.is_requested() {
+    sink(@llm.CancellationPendingProcess(process))
+    return Err(@errors.turn_cancelled())
+  }
+  if @env.now().reinterpret_as_int64() >= snapshot.deadline_at {
+    return Err(@errors.turn_timed_out())
+  }
+  result
 }
 
 ///|
@@ -415,6 +467,35 @@ pub async fn run_turn(
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
   sink : (@llm.CompletionEvent) -> Unit,
 ) -> Result[TurnResult, @errors.EngineError] {
+  run_turn_controlled(
+    connection,
+    agent,
+    connector,
+    client,
+    existing_chat_id,
+    input,
+    ids,
+    now,
+    default_turn_execution_options(),
+    invoke,
+    sink,
+  )
+}
+
+///|
+pub async fn run_turn_controlled(
+  connection : @sqlite3.Connection,
+  agent : Agent,
+  connector : @llm.Connector,
+  client : Client,
+  existing_chat_id : String?,
+  input : String,
+  ids : Ids,
+  now : Int64,
+  execution : TurnExecutionOptions,
+  invoke : (String, Json) -> Result[Json, @errors.EngineError],
+  sink : (@llm.CompletionEvent) -> Unit,
+) -> Result[TurnResult, @errors.EngineError] {
   run_turn_inner(
     connection,
     agent,
@@ -434,6 +515,7 @@ pub async fn run_turn(
     },
     ids,
     now,
+    execution,
     invoke,
     sink,
   )
@@ -458,6 +540,42 @@ pub async fn run_turn_message(
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
   sink : (@llm.CompletionEvent) -> Unit,
 ) -> Result[TurnResult, @errors.EngineError] {
+  run_turn_message_controlled(
+    connection,
+    agent,
+    connector,
+    client,
+    existing_chat_id,
+    input,
+    preview,
+    project,
+    ids,
+    now,
+    default_turn_execution_options(),
+    invoke,
+    sink,
+  )
+}
+
+///|
+pub async fn run_turn_message_controlled(
+  connection : @sqlite3.Connection,
+  agent : Agent,
+  connector : @llm.Connector,
+  client : Client,
+  existing_chat_id : String?,
+  input : @content.Message,
+  preview : String,
+  project : (Array[@content.Message]) -> Result[
+    Array[Json],
+    @errors.EngineError,
+  ],
+  ids : Ids,
+  now : Int64,
+  execution : TurnExecutionOptions,
+  invoke : (String, Json) -> Result[Json, @errors.EngineError],
+  sink : (@llm.CompletionEvent) -> Unit,
+) -> Result[TurnResult, @errors.EngineError] {
   if agent.before_process.length() > 0 {
     return Err(
       @errors.invalid_argument(
@@ -476,6 +594,7 @@ pub async fn run_turn_message(
     project,
     ids,
     now,
+    execution,
     invoke,
     sink,
   )
@@ -496,6 +615,7 @@ async fn run_turn_inner(
   ],
   ids : Ids,
   now : Int64,
+  execution : TurnExecutionOptions,
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
   sink : (@llm.CompletionEvent) -> Unit,
 ) -> Result[TurnResult, @errors.EngineError] {
@@ -532,6 +652,12 @@ async fn run_turn_inner(
       ids.chat_id
     }
   }
+  let deadline_at = if execution.deadline_at > started_at &&
+    execution.deadline_at - started_at <= 300000 {
+    execution.deadline_at
+  } else {
+    started_at + 300000
+  }
   let mut snapshot = match
     context_snapshot(
       "ctx_" + ids.turn_id,
@@ -540,9 +666,9 @@ async fn run_turn_inner(
       ids.turn_id,
       agent.id,
       connector.id,
-      Json::object(Map([])),
+      execution.metadata,
       started_at,
-      started_at + 300000,
+      deadline_at,
     ) {
     Ok(value) => value
     Err(error) => return Err(error)
@@ -557,6 +683,7 @@ async fn run_turn_inner(
       chat_id,
       input,
       now,
+      deadline_at=snapshot.deadline_at,
     ) {
     Ok(_) => ()
     Err(error) => return Err(error)
@@ -604,21 +731,29 @@ async fn run_turn_inner(
   let mut canonical_wire : Array[Json]? = None
   let mut request_temperature = agent.options.temperature
   let mut request_max_tokens = agent.options.max_tokens
-  let mut metadata : Json = Json::object(Map([]))
+  let mut metadata : Json = snapshot.metadata
   let all_events : Array[@llm.CompletionEvent] = []
   lifecycle = lifecycle.advance(Creating).unwrap()
   if agent.create_process.length() > 0 {
-    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-      let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-      return Err(
-        fail_active_turn(runtime, ids.assistant_message_id, error, now),
-      )
+    match turn_control_error(execution, snapshot) {
+      Some(error) =>
+        return Err(
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
+        )
+      None => ()
     }
     let started = @llm.HookStarted("create")
     sink(started)
     all_events.push(started)
     let output = match
-      invoke(
+      invoke_controlled(
+        execution,
+        snapshot,
         agent.create_process,
         create_input_json(
           snapshot,
@@ -627,20 +762,19 @@ async fn run_turn_inner(
           request_temperature,
           request_max_tokens,
         ),
+        invoke,
+        sink,
       ) {
       Ok(value) => value
       Err(error) =>
         return Err(
-          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
         )
-    }
-    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-      let error = @errors.turn_limit_exceeded(
-        "turn deadline exceeded after Create hook",
-      )
-      return Err(
-        fail_active_turn(runtime, ids.assistant_message_id, error, now),
-      )
     }
     let decision = match
       apply_create_decision(
@@ -708,11 +842,17 @@ async fn run_turn_inner(
     }
   }
   if agent.before_process.length() > 0 {
-    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-      let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-      return Err(
-        fail_active_turn(runtime, ids.assistant_message_id, error, now),
-      )
+    match turn_control_error(execution, snapshot) {
+      Some(error) =>
+        return Err(
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
+        )
+      None => ()
     }
     let started = @llm.HookStarted("before")
     sink(started)
@@ -726,20 +866,25 @@ async fn run_turn_inner(
       "input": { "content": input },
       "metadata": metadata,
     }
-    let output = match invoke(agent.before_process, hook_input) {
+    let output = match
+      invoke_controlled(
+        execution,
+        snapshot,
+        agent.before_process,
+        hook_input,
+        invoke,
+        sink,
+      ) {
       Ok(value) => value
       Err(error) =>
         return Err(
-          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
         )
-    }
-    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-      let error = @errors.turn_limit_exceeded(
-        "turn deadline exceeded after before hook",
-      )
-      return Err(
-        fail_active_turn(runtime, ids.assistant_message_id, error, now),
-      )
     }
     guard output is Object(object) else {
       let error = @errors.tool_error("before hook must return an object")
@@ -806,11 +951,17 @@ async fn run_turn_inner(
   let mut completion_tokens = 0
   let tool_results : Array[NextToolResult] = []
   while round < 8 {
-    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-      let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-      return Err(
-        fail_active_turn(runtime, ids.assistant_message_id, error, now),
-      )
+    match turn_control_error(execution, snapshot) {
+      Some(error) =>
+        return Err(
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
+        )
+      None => ()
     }
     let request : @llm.ChatRequest = {
       model: connector.model,
@@ -838,12 +989,26 @@ async fn run_turn_inner(
         request,
         event => if event != @llm.Started || round == 0 { sink(event) },
         round,
+        @async.now() +
+        (snapshot.deadline_at - @env.now().reinterpret_as_int64()),
       ) {
       Ok(value) => value
       Err(error) =>
         return Err(
           fail_active_turn(runtime, ids.assistant_message_id, error, now),
         )
+    }
+    match turn_control_error(execution, snapshot) {
+      Some(error) =>
+        return Err(
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
+        )
+      None => ()
     }
     round = round + 1
     let (events, content, usage) = completed
@@ -917,33 +1082,35 @@ async fn run_turn_inner(
           Ok(value) => value
           Err(_) => Json::null()
         }
-        let execution = match arguments {
+        let tool_execution = match arguments {
           Err(error) => Err(error)
           Ok(value) =>
             match validate_arguments(value, tool.input_schema) {
               Err(error) => Err(error)
               Ok(_) =>
-                if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-                  Err(
-                    @errors.turn_limit_exceeded(
-                      "turn deadline exceeded before tool execution",
-                    ),
-                  )
-                } else {
-                  let result = invoke(tool.process, value)
-                  if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-                    Err(
-                      @errors.turn_limit_exceeded(
-                        "turn deadline exceeded after tool execution",
-                      ),
-                    )
-                  } else {
-                    result
-                  }
-                }
+                invoke_controlled(
+                  execution,
+                  snapshot,
+                  tool.process,
+                  value,
+                  invoke,
+                  sink,
+                )
             }
         }
-        let (ok, payload, terminal) = match execution {
+        match tool_execution {
+          Err(error) if is_turn_control_error(error) =>
+            return Err(
+              fail_active_turn(
+                runtime,
+                ids.assistant_message_id,
+                error,
+                @env.now().reinterpret_as_int64(),
+              ),
+            )
+          _ => ()
+        }
+        let (ok, payload, terminal) = match tool_execution {
           Ok(value) if value.stringify().length() <= 262144 =>
             (true, value, false)
           Ok(_) =>
@@ -1031,35 +1198,37 @@ async fn run_turn_inner(
     let mut next_data : Json? = None
     if agent.next_process.length() > 0 {
       lifecycle = lifecycle.advance(Next).unwrap()
-      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-        let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-        return Err(
-          fail_active_turn(runtime, ids.assistant_message_id, error, now),
-        )
+      match turn_control_error(execution, snapshot) {
+        Some(error) =>
+          return Err(
+            fail_active_turn(
+              runtime,
+              ids.assistant_message_id,
+              error,
+              @env.now().reinterpret_as_int64(),
+            ),
+          )
+        None => ()
       }
       let started = @llm.HookStarted("next")
       sink(started)
       all_events.push(started)
       let output = match
-        invoke(
+        invoke_controlled(
+          execution,
+          snapshot,
           agent.next_process,
           next_input_json(
             snapshot, canonical_messages, content, total_usage, tool_results,
           ),
+          invoke,
+          sink,
         ) {
         Ok(value) => value
         Err(error) =>
           return Err(
             fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
-      }
-      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-        let error = @errors.turn_limit_exceeded(
-          "turn deadline exceeded after Next hook",
-        )
-        return Err(
-          fail_active_turn(runtime, ids.assistant_message_id, error, now),
-        )
       }
       let decision = match apply_next_decision(output, snapshot) {
         Ok(value) => value
@@ -1089,11 +1258,17 @@ async fn run_turn_inner(
       sink(completed)
       all_events.push(completed)
     } else if agent.after_process.length() > 0 {
-      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-        let error = @errors.turn_limit_exceeded("turn deadline exceeded")
-        return Err(
-          fail_active_turn(runtime, ids.assistant_message_id, error, now),
-        )
+      match turn_control_error(execution, snapshot) {
+        Some(error) =>
+          return Err(
+            fail_active_turn(
+              runtime,
+              ids.assistant_message_id,
+              error,
+              @env.now().reinterpret_as_int64(),
+            ),
+          )
+        None => ()
       }
       let started = @llm.HookStarted("after")
       sink(started)
@@ -1106,20 +1281,20 @@ async fn run_turn_inner(
         "completion": { "content": content },
         "metadata": metadata,
       }
-      let output = match invoke(agent.after_process, hook_input) {
+      let output = match
+        invoke_controlled(
+          execution,
+          snapshot,
+          agent.after_process,
+          hook_input,
+          invoke,
+          sink,
+        ) {
         Ok(value) => value
         Err(error) =>
           return Err(
             fail_active_turn(runtime, ids.assistant_message_id, error, now),
           )
-      }
-      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
-        let error = @errors.turn_limit_exceeded(
-          "turn deadline exceeded after after hook",
-        )
-        return Err(
-          fail_active_turn(runtime, ids.assistant_message_id, error, now),
-        )
       }
       let action = match parse_after(output) {
         Ok(value) => value
@@ -1173,12 +1348,24 @@ async fn run_turn_inner(
       lifecycle = lifecycle.advance(Next).unwrap()
     }
     lifecycle = lifecycle.advance(Finalizing).unwrap()
+    match turn_control_error(execution, snapshot) {
+      Some(error) =>
+        return Err(
+          fail_active_turn(
+            runtime,
+            ids.assistant_message_id,
+            error,
+            @env.now().reinterpret_as_int64(),
+          ),
+        )
+      None => ()
+    }
     match
       finalize_turn(
         runtime,
         ids.assistant_message_id,
         Completed(final_content, total_usage),
-        now,
+        @env.now().reinterpret_as_int64(),
       ) {
       Ok(_) => {
         lifecycle = lifecycle.advance(Terminal).unwrap()

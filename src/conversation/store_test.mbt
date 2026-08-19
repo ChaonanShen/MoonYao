@@ -264,3 +264,72 @@ test "platform queries filter chats, hide internal messages, and report active t
   }
   connection.close()
 }
+
+///|
+test "v4 migration preserves turns and foreign keys while adding control state" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  let setup = [
+    "PRAGMA foreign_keys = ON", "CREATE TABLE _moonyao_migrations (version INTEGER PRIMARY KEY)",
+    "CREATE TABLE _moonyao_chats (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','deleted')), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+    "CREATE TABLE _moonyao_turns (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES _moonyao_chats(id) ON DELETE CASCADE, status TEXT NOT NULL CHECK(status IN ('active','completed','failed','interrupted')), error_code TEXT NOT NULL, error_message TEXT NOT NULL, prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL)",
+    "CREATE TABLE _moonyao_messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES _moonyao_chats(id) ON DELETE CASCADE, turn_id TEXT NOT NULL REFERENCES _moonyao_turns(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, role TEXT NOT NULL, kind TEXT NOT NULL, content_json TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, canonical_json TEXT NOT NULL DEFAULT '', UNIQUE(chat_id, sequence))",
+    "INSERT INTO _moonyao_migrations(version) VALUES (1), (2), (3), (4)", "INSERT INTO _moonyao_chats VALUES ('chat', 'todo', 'old', 'active', 1, 1)",
+    "INSERT INTO _moonyao_turns VALUES ('turn', 'chat', 'completed', '', '', 2, 1, 2, 3)",
+  ]
+  for sql in setup {
+    let statement = connection.prepare(sql)
+    statement.step_once()
+    statement.finalize()
+  }
+  let message = connection.prepare(
+    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at, canonical_json) VALUES ('user', 'chat', 'turn', 1, 'user', 'text', '\"hello\"', 'completed', 2, '')",
+  )
+  message.step_once()
+  message.finalize()
+  match migrate(connection) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  let turn = get_turn(connection, "turn").unwrap()
+  assert_eq(turn.status, "completed")
+  assert_eq(turn.cancel_requested_at, 0)
+  assert_eq(turn.deadline_at, 0)
+  let foreign_keys = connection.prepare("PRAGMA foreign_key_check")
+  assert_false(foreign_keys.step())
+  foreign_keys.finalize()
+  ignore(delete_chat(connection, "chat"))
+  match get_turn(connection, "turn") {
+    Err(error) => assert_eq(error.code, @errors.RecordNotFound)
+    Ok(_) => fail("expected turn cascade deletion")
+  }
+  connection.close()
+}
+
+///|
+test "turn cancellation request is idempotent and terminal control uses CAS" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(migrate(connection))
+  ignore(create_chat(connection, "chat", "todo", "control", 1))
+  ignore(
+    begin_turn(connection, "turn", "user", "chat", "hello", 2, deadline_at=5000),
+  )
+  assert_eq(
+    request_turn_cancel(connection, "turn", 10).unwrap().cancel_requested_at,
+    10,
+  )
+  assert_eq(
+    request_turn_cancel(connection, "turn", 20).unwrap().cancel_requested_at,
+    10,
+  )
+  assert_true(cancel_turn(connection, "turn", 30).unwrap())
+  assert_false(timeout_turn(connection, "turn", 31).unwrap())
+  assert_false(interrupt_turn(connection, "turn", 32).unwrap())
+  let turn = request_turn_cancel(connection, "turn", 40).unwrap()
+  assert_eq(turn.status, "cancelled")
+  assert_eq(turn.cancel_requested_at, 10)
+  match request_turn_cancel(connection, "missing", 50) {
+    Err(error) => assert_eq(error.code, @errors.RecordNotFound)
+    Ok(_) => fail("expected missing turn rejection")
+  }
+  connection.close()
+}

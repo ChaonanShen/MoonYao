@@ -744,6 +744,7 @@ async test "synchronous Process cancellation is reported and discards its result
       tool_test_ids("soft-cancel"),
       1,
       {
+        ..default_turn_execution_options(),
         cancellation,
         deadline_at: @env.now().reinterpret_as_int64() + 5000,
         metadata: {},
@@ -1144,6 +1145,11 @@ async test "Next hook receives tool results and returns persisted custom data" {
     }
     Err(error) => fail(error.message)
   }
+  let journal = @conversation.list_events(connection, "turnnext", 0, 100).unwrap()
+  assert_eq(journal.last().unwrap().event, "turn.completed")
+  assert_true(
+    journal.last().unwrap().data.stringify().contains("custom answer"),
+  )
   connection.close()
 }
 

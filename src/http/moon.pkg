@@ -11,5 +11,7 @@ import {
   "moonbitlang/core/json",
   "moonbitlang/core/string",
   "moonbitlang/x/codec/base64",
+  "moonbitlang/x/crypto",
+  "moonbitlang/x/encoding",
   "moonbit-community/sqlite3",
 }

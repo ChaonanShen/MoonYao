@@ -26,6 +26,10 @@ pub(all) struct Turn {
   id : String
   chat_id : String
   status : String
+  retry_of_turn_id : String
+  attempt : Int
+  idempotency_key : String
+  request_hash : String
   error_code : String
   error_message : String
   prompt_tokens : Int
@@ -143,7 +147,11 @@ pub fn migrate(
     Ok(_) =>
       match migrate_v4(connection) {
         Err(error) => Err(error)
-        Ok(_) => migrate_v5(connection)
+        Ok(_) =>
+          match migrate_v5(connection) {
+            Err(error) => Err(error)
+            Ok(_) => migrate_v6(connection)
+          }
       }
   }
 }
@@ -255,26 +263,15 @@ pub fn recover_active(
   connection : @sqlite3.Connection,
   now : Int64,
 ) -> Result[Int, @errors.EngineError] {
-  let count_statement = connection.prepare(
-    "SELECT COUNT(*) FROM _moonyao_turns WHERE status = 'active'",
-  ) catch {
-    _ =>
-      return Err(
-        @errors.database_error(
-          "could not inspect active turns", "conversation.recover",
-        ),
-      )
+  match exec(connection, "BEGIN IMMEDIATE", "conversation.recover") {
+    Err(error) => return Err(error)
+    Ok(_) => ()
   }
-  let count = try {
-    ignore(count_statement.step())
-    let value : Int = count_statement.column(index=0)
-    count_statement.finalize()
-    value
-  } catch {
+  let select = connection.prepare(
+    "SELECT id FROM _moonyao_turns WHERE status = 'active' ORDER BY started_at, id",
+  ) catch {
     _ => {
-      count_statement.finalize() catch {
-        _ => ()
-      }
+      rollback(connection)
       return Err(
         @errors.database_error(
           "could not inspect active turns", "conversation.recover",
@@ -282,31 +279,84 @@ pub fn recover_active(
       )
     }
   }
-  let statement = connection.prepare(
-    "UPDATE _moonyao_turns SET status = 'interrupted', error_code = 'turn_interrupted', error_message = 'turn was interrupted', finished_at = ? WHERE status = 'active'",
-  ) catch {
-    _ =>
-      return Err(
-        @errors.database_error(
-          "could not recover active turns", "conversation.recover",
-        ),
-      )
-  }
+  let ids : Array[String] = []
   try {
-    statement.bind(index=1, now)
-    statement.step_once()
-    statement.finalize()
-    Ok(count)
+    while select.step() {
+      let id : String = select.column(index=0)
+      ids.push(id)
+    }
+    select.finalize()
   } catch {
     _ => {
-      statement.finalize() catch {
+      select.finalize() catch {
         _ => ()
       }
-      Err(
+      rollback(connection)
+      return Err(
         @errors.database_error(
-          "could not recover active turns", "conversation.recover",
+          "could not inspect active turns", "conversation.recover",
         ),
       )
+    }
+  }
+  for id in ids {
+    let statement = connection.prepare(
+      "UPDATE _moonyao_turns SET status = 'interrupted', error_code = 'turn_interrupted', error_message = 'turn was interrupted', finished_at = ? WHERE id = ? AND status = 'active'",
+    ) catch {
+      _ => {
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not recover active turns", "conversation.recover",
+          ),
+        )
+      }
+    }
+    try {
+      statement.bind(index=1, now)
+      statement.bind(index=2, id)
+      statement.step_once()
+      statement.finalize()
+    } catch {
+      _ => {
+        statement.finalize() catch {
+          _ => ()
+        }
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not recover active turns", "conversation.recover",
+          ),
+        )
+      }
+    }
+    let turn = match get_turn(connection, id) {
+      Ok(value) => value
+      Err(error) => {
+        rollback(connection)
+        return Err(error)
+      }
+    }
+    match
+      append_event_row(
+        connection,
+        id,
+        "turn.interrupted",
+        terminal_event_data(turn),
+        now,
+      ) {
+      Err(error) => {
+        rollback(connection)
+        return Err(error)
+      }
+      Ok(_) => ()
+    }
+  }
+  match exec(connection, "COMMIT", "conversation.recover") {
+    Ok(_) => Ok(ids.length())
+    Err(error) => {
+      rollback(connection)
+      Err(error)
     }
   }
 }
@@ -506,7 +556,7 @@ pub fn get_turn(
   id : String,
 ) -> Result[Turn, @errors.EngineError] {
   let statement = connection.prepare(
-    "SELECT id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, cancel_requested_at, deadline_at, started_at, finished_at FROM _moonyao_turns WHERE id = ?",
+    "SELECT id, chat_id, status, retry_of_turn_id, attempt, idempotency_key, request_hash, error_code, error_message, prompt_tokens, completion_tokens, cancel_requested_at, deadline_at, started_at, finished_at FROM _moonyao_turns WHERE id = ?",
   ) catch {
     _ =>
       return Err(@errors.database_error("could not prepare turn query", "turn"))
@@ -521,14 +571,18 @@ pub fn get_turn(
       id: statement.column(index=0),
       chat_id: statement.column(index=1),
       status: statement.column(index=2),
-      error_code: statement.column(index=3),
-      error_message: statement.column(index=4),
-      prompt_tokens: statement.column(index=5),
-      completion_tokens: statement.column(index=6),
-      cancel_requested_at: statement.column(index=7),
-      deadline_at: statement.column(index=8),
-      started_at: statement.column(index=9),
-      finished_at: statement.column(index=10),
+      retry_of_turn_id: statement.column(index=3),
+      attempt: statement.column(index=4),
+      idempotency_key: statement.column(index=5),
+      request_hash: statement.column(index=6),
+      error_code: statement.column(index=7),
+      error_message: statement.column(index=8),
+      prompt_tokens: statement.column(index=9),
+      completion_tokens: statement.column(index=10),
+      cancel_requested_at: statement.column(index=11),
+      deadline_at: statement.column(index=12),
+      started_at: statement.column(index=13),
+      finished_at: statement.column(index=14),
     }
     statement.finalize()
     Ok(turn)
@@ -538,6 +592,53 @@ pub fn get_turn(
         _ => ()
       }
       Err(@errors.database_error("could not read turn", "turn"))
+    }
+  }
+}
+
+///|
+pub fn get_turn_by_idempotency(
+  connection : @sqlite3.Connection,
+  chat_id : String,
+  key : String,
+) -> Result[Turn?, @errors.EngineError] {
+  if key.length() == 0 {
+    return Ok(None)
+  }
+  let statement = connection.prepare(
+    "SELECT id FROM _moonyao_turns WHERE chat_id = ? AND idempotency_key = ? LIMIT 1",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not prepare idempotency query", "turn"),
+      )
+  }
+  let id : String = try {
+    statement.bind(index=1, chat_id)
+    statement.bind(index=2, key)
+    let value : String = if statement.step() {
+      statement.column(index=0)
+    } else {
+      ""
+    }
+    statement.finalize()
+    value
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      return Err(
+        @errors.database_error("could not read idempotent turn", "turn"),
+      )
+    }
+  }
+  if id.length() == 0 {
+    Ok(None)
+  } else {
+    match get_turn(connection, id) {
+      Ok(turn) => Ok(Some(turn))
+      Err(error) => Err(error)
     }
   }
 }
@@ -622,15 +723,108 @@ pub fn begin_turn(
   content : String,
   now : Int64,
   deadline_at? : Int64 = 0L,
+  retry_of_turn_id? : String = "",
+  attempt? : Int = 1,
+  idempotency_key? : String = "",
+  request_hash? : String = "",
+  canonical_message? : @content.Message? = None,
+  retry_source_turn_id? : String = "",
 ) -> Result[Unit, @errors.EngineError] {
   match get_chat(connection, chat_id) {
     Err(e) => return Err(e)
     Ok(_) => ()
   }
-  let canonical = @content.encode(@content.text_message(@content.User, content)).stringify()
+  let input = canonical_message.unwrap_or(
+    @content.text_message(@content.User, content),
+  )
+  if input.role != @content.User {
+    return Err(
+      @errors.invalid_argument("current message must be user", "message"),
+    )
+  }
+  let canonical = @content.encode(input).stringify()
+  if canonical.length() > 262144 {
+    return Err(
+      @errors.invalid_argument("canonical message is too large", "message"),
+    )
+  }
+  let attachment_refs = attachment_ids(input)
+  if attachment_refs.length() > 8 {
+    return Err(
+      @errors.invalid_argument(
+        "too many message attachments", "message.content",
+      ),
+    )
+  }
+  for attachment_id in attachment_refs {
+    match @attachment.get(connection, attachment_id) {
+      Err(error) => return Err(error)
+      Ok(_) => ()
+    }
+  }
   match exec(connection, "BEGIN IMMEDIATE", "turn.begin") {
     Err(e) => return Err(e)
     Ok(_) => ()
+  }
+  let mut actual_retry_of = retry_of_turn_id
+  let mut actual_attempt = attempt
+  if retry_source_turn_id.length() > 0 {
+    let source = match get_turn(connection, retry_source_turn_id) {
+      Ok(value) => value
+      Err(error) => {
+        rollback(connection)
+        return Err(error)
+      }
+    }
+    if source.chat_id != chat_id {
+      rollback(connection)
+      return Err(
+        @errors.turn_retry_conflict("retry turn belongs to another chat"),
+      )
+    }
+    if !["failed", "cancelled", "timed_out", "interrupted"].contains(
+        source.status,
+      ) {
+      rollback(connection)
+      return Err(@errors.turn_retry_conflict("turn status cannot be retried"))
+    }
+    actual_retry_of = if source.retry_of_turn_id.length() > 0 {
+      source.retry_of_turn_id
+    } else {
+      source.id
+    }
+    let attempts = connection.prepare(
+      "SELECT COALESCE(MAX(attempt), 1) + 1 FROM _moonyao_turns WHERE id = ? OR retry_of_turn_id = ?",
+    ) catch {
+      _ => {
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not prepare retry attempt", "turn.retry",
+          ),
+        )
+      }
+    }
+    actual_attempt = try {
+      attempts.bind(index=1, actual_retry_of)
+      attempts.bind(index=2, actual_retry_of)
+      ignore(attempts.step())
+      let value : Int = attempts.column(index=0)
+      attempts.finalize()
+      value
+    } catch {
+      _ => {
+        attempts.finalize() catch {
+          _ => ()
+        }
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not allocate retry attempt", "turn.retry",
+          ),
+        )
+      }
+    }
   }
   let next_statement = connection.prepare(
     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM _moonyao_messages WHERE chat_id = ?",
@@ -660,7 +854,7 @@ pub fn begin_turn(
     }
   }
   let turn = connection.prepare(
-    "INSERT INTO _moonyao_turns(id, chat_id, status, error_code, error_message, prompt_tokens, completion_tokens, cancel_requested_at, deadline_at, started_at, finished_at) VALUES (?, ?, 'active', '', '', -1, -1, 0, ?, ?, 0)",
+    "INSERT INTO _moonyao_turns(id, chat_id, status, retry_of_turn_id, attempt, idempotency_key, request_hash, error_code, error_message, prompt_tokens, completion_tokens, cancel_requested_at, deadline_at, started_at, finished_at) VALUES (?, ?, 'active', ?, ?, ?, ?, '', '', -1, -1, 0, ?, ?, 0)",
   ) catch {
     _ => {
       rollback(connection)
@@ -670,8 +864,12 @@ pub fn begin_turn(
   try {
     turn.bind(index=1, turn_id)
     turn.bind(index=2, chat_id)
-    turn.bind(index=3, deadline_at)
-    turn.bind(index=4, now)
+    turn.bind(index=3, actual_retry_of)
+    turn.bind(index=4, actual_attempt)
+    turn.bind(index=5, idempotency_key)
+    turn.bind(index=6, request_hash)
+    turn.bind(index=7, deadline_at)
+    turn.bind(index=8, now)
     turn.step_once()
     turn.finalize()
   } catch {
@@ -683,8 +881,12 @@ pub fn begin_turn(
       return Err(@errors.turn_conflict())
     }
   }
+  let kind = match input.content {
+    Some(@content.Parts(_)) => "multipart"
+    _ => "text"
+  }
   let message = connection.prepare(
-    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at, canonical_json) VALUES (?, ?, ?, ?, 'user', 'text', ?, 'completed', ?, ?)",
+    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at, canonical_json) VALUES (?, ?, ?, ?, 'user', ?, ?, 'completed', ?, ?)",
   ) catch {
     _ => {
       rollback(connection)
@@ -698,9 +900,17 @@ pub fn begin_turn(
     message.bind(index=2, chat_id)
     message.bind(index=3, turn_id)
     message.bind(index=4, sequence)
-    message.bind(index=5, Json::string(content).stringify())
-    message.bind(index=6, now)
-    message.bind(index=7, canonical)
+    message.bind(index=5, kind)
+    message.bind(
+      index=6,
+      if kind == "text" {
+        Json::string(content).stringify()
+      } else {
+        canonical
+      },
+    )
+    message.bind(index=7, now)
+    message.bind(index=8, canonical)
     message.step_once()
     message.finalize()
   } catch {
@@ -711,6 +921,64 @@ pub fn begin_turn(
       rollback(connection)
       return Err(@errors.database_error("could not save user message", "turn"))
     }
+  }
+  for index = 0; index < attachment_refs.length(); index = index + 1 {
+    let reference = connection.prepare(
+      "INSERT INTO _moonyao_message_attachments(message_id, attachment_id, position) VALUES (?, ?, ?)",
+    ) catch {
+      _ => {
+        rollback(connection)
+        return Err(
+          @errors.database_error(
+            "could not prepare attachment references", "turn",
+          ),
+        )
+      }
+    }
+    try {
+      reference.bind(index=1, message_id)
+      reference.bind(index=2, attachment_refs[index])
+      reference.bind(index=3, index)
+      reference.step_once()
+      reference.finalize()
+    } catch {
+      _ => {
+        reference.finalize() catch {
+          _ => ()
+        }
+        rollback(connection)
+        return Err(
+          @errors.database_error("could not save attachment references", "turn"),
+        )
+      }
+    }
+  }
+  match
+    append_event_row(
+      connection,
+      turn_id,
+      "turn.started",
+      {
+        "chat_id": chat_id,
+        "retry_of_turn_id": if actual_retry_of.length() > 0 {
+          Json::string(actual_retry_of)
+        } else {
+          Json::null()
+        },
+        "attempt": actual_attempt,
+        "side_effect_warning": if actual_retry_of.length() > 0 {
+          Json::string("Retry may repeat Process side effects")
+        } else {
+          Json::null()
+        },
+      },
+      now,
+    ) {
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+    Ok(_) => ()
   }
   match exec(connection, "COMMIT", "turn.begin") {
     Ok(_) => Ok(())
@@ -881,6 +1149,59 @@ pub fn complete_turn(
       return Err(@errors.database_error("could not update chat", "turn"))
     }
   }
+  match
+    append_event_row(
+      connection,
+      turn_id,
+      "message.completed",
+      {
+        "chat_id": chat_id,
+        "message": {
+          "id": message_id,
+          "chat_id": chat_id,
+          "turn_id": turn_id,
+          "role": "assistant",
+          "kind": "text",
+          "content": content,
+          "status": "completed",
+        },
+      },
+      now,
+    ) {
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+    Ok(_) => ()
+  }
+  let completed_turn = match get_turn(connection, turn_id) {
+    Ok(value) => value
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+  }
+  let next = match completion_next_data(connection, turn_id) {
+    Ok(value) => value
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+  }
+  match
+    append_event_row(
+      connection,
+      turn_id,
+      "turn.completed",
+      terminal_event_data(completed_turn, next~),
+      now,
+    ) {
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+    Ok(_) => ()
+  }
   match exec(connection, "COMMIT", "turn.complete") {
     Ok(_) => Ok(())
     Err(e) => {
@@ -959,6 +1280,27 @@ pub fn fail_turn(
       return Err(@errors.database_error("could not fail turn", "turn"))
     }
   }
+  let failed_turn = match get_turn(connection, turn_id) {
+    Ok(value) => value
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+  }
+  match
+    append_event_row(
+      connection,
+      turn_id,
+      "turn.failed",
+      terminal_event_data(failed_turn),
+      now,
+    ) {
+    Err(error) => {
+      rollback(connection)
+      return Err(error)
+    }
+    Ok(_) => ()
+  }
   match exec(connection, "COMMIT", "turn.fail") {
     Ok(_) => Ok(())
     Err(error) => {
@@ -1014,13 +1356,19 @@ fn control_terminal_turn(
       @errors.invalid_argument("invalid terminal turn state", "turn.status"),
     )
   }
+  match exec(connection, "BEGIN IMMEDIATE", "turn.control") {
+    Err(error) => return Err(error)
+    Ok(_) => ()
+  }
   let statement = connection.prepare(
     "UPDATE _moonyao_turns SET status = ?, error_code = ?, error_message = ?, finished_at = ? WHERE id = ? AND status = 'active'",
   ) catch {
-    _ =>
+    _ => {
+      rollback(connection)
       return Err(
         @errors.database_error("could not prepare terminal turn", "turn"),
       )
+    }
   }
   try {
     statement.bind(index=1, status)
@@ -1035,26 +1383,62 @@ fn control_terminal_turn(
       statement.finalize() catch {
         _ => ()
       }
+      rollback(connection)
       return Err(@errors.database_error("could not finalize turn", "turn"))
     }
   }
   let changes = connection.prepare("SELECT changes()") catch {
-    _ =>
+    _ => {
+      rollback(connection)
       return Err(
         @errors.database_error("could not inspect terminal turn", "turn"),
       )
+    }
   }
-  try {
+  let changed = try {
     ignore(changes.step())
     let count : Int = changes.column(index=0)
     changes.finalize()
-    Ok(count == 1)
+    count == 1
   } catch {
     _ => {
       changes.finalize() catch {
         _ => ()
       }
-      Err(@errors.database_error("could not inspect terminal turn", "turn"))
+      rollback(connection)
+      return Err(
+        @errors.database_error("could not inspect terminal turn", "turn"),
+      )
+    }
+  }
+  if changed {
+    let turn = match get_turn(connection, turn_id) {
+      Ok(value) => value
+      Err(error) => {
+        rollback(connection)
+        return Err(error)
+      }
+    }
+    match
+      append_event_row(
+        connection,
+        turn_id,
+        "turn." + status,
+        terminal_event_data(turn),
+        now,
+      ) {
+      Err(error) => {
+        rollback(connection)
+        return Err(error)
+      }
+      Ok(_) => ()
+    }
+  }
+  match exec(connection, "COMMIT", "turn.control") {
+    Ok(_) => Ok(changed)
+    Err(error) => {
+      rollback(connection)
+      Err(error)
     }
   }
 }

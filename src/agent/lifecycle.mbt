@@ -65,6 +65,8 @@ pub fn context_snapshot(
   metadata : Json,
   started_at : Int64,
   deadline_at : Int64,
+  retry_of_turn_id? : String = "",
+  attempt? : Int = 1,
 ) -> Result[TurnContextSnapshot, @errors.EngineError] {
   if context_id.length() == 0 ||
     request_id.length() == 0 ||
@@ -119,8 +121,12 @@ pub fn context_snapshot(
     metadata,
     started_at,
     deadline_at,
-    retry_of_turn_id: None,
-    attempt: 1,
+    retry_of_turn_id: if retry_of_turn_id.length() > 0 {
+      Some(retry_of_turn_id)
+    } else {
+      None
+    },
+    attempt,
   })
 }
 

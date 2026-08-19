@@ -30,6 +30,12 @@ pub(all) struct TurnExecutionOptions {
   cancellation : TurnCancellation
   deadline_at : Int64
   metadata : Json
+  prestarted : Bool
+  retry_source_turn_id : String
+  retry_of_turn_id : String
+  attempt : Int
+  idempotency_key : String
+  request_hash : String
 }
 
 ///|
@@ -38,6 +44,12 @@ pub fn default_turn_execution_options() -> TurnExecutionOptions {
     cancellation: TurnCancellation::new(),
     deadline_at: 0L,
     metadata: Json::object(Map([])),
+    prestarted: false,
+    retry_source_turn_id: "",
+    retry_of_turn_id: "",
+    attempt: 1,
+    idempotency_key: "",
+    request_hash: "",
   }
 }
 

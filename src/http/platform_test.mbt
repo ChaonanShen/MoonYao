@@ -261,6 +261,101 @@ test "platform inputs and pagination are strict" {
     Err(error) => assert_eq(error.path, "body.options.metadata")
     Ok(_) => fail("expected metadata object")
   }
+  let first = turn_input({
+    "content": "hello",
+    "options": { "metadata": { "b": 2, "a": 1 } },
+  }).unwrap()
+  let second = turn_input({
+    "options": { "metadata": { "a": 1, "b": 2 } },
+    "content": "hello",
+  }).unwrap()
+  assert_eq(turn_request_hash(first, ""), turn_request_hash(second, ""))
+  match validate_idempotency_key("turn:client_1-2.3") {
+    Ok(_) => ()
+    Err(error) => fail(error.message)
+  }
+  for invalid in ["", "bad key", "x".repeat(129)] {
+    match validate_idempotency_key(invalid) {
+      Err(error) => assert_eq(error.path, "headers.idempotency-key")
+      Ok(_) => fail("expected invalid idempotency key")
+    }
+  }
+  match event_cursor("-1", "query.after") {
+    Err(error) => assert_eq(error.path, "query.after")
+    Ok(_) => fail("expected invalid event cursor")
+  }
+  assert_eq(
+    turn_event_cursor("turn:3", "turn", "headers.last-event-id").unwrap(),
+    3,
+  )
+  match turn_event_cursor("other:3", "turn", "headers.last-event-id") {
+    Err(error) => assert_eq(error.path, "headers.last-event-id")
+    Ok(_) => fail("expected cross-turn cursor rejection")
+  }
+}
+
+///|
+test "platform dispatches retry and event replay actions safely" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  ignore(@conversation.create_chat(connection, "chat", "todo", "Retry", 1))
+  ignore(
+    @conversation.begin_turn(connection, "failed", "user", "chat", "hello", 2),
+  )
+  ignore(
+    @conversation.fail_turn(connection, "failed", "llm_error", "failed", 3),
+  )
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "POST",
+      "/v1/turns/failed/retry",
+      {},
+      Map([]),
+      "unused",
+      4,
+    ) {
+    Ok(Some(RetryTurn(id))) => assert_eq(id, "failed")
+    _ => fail("expected retry action")
+  }
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "GET",
+      "/v1/turns/failed/events",
+      {},
+      { "after": "1" },
+      "unused",
+      4,
+    ) {
+    Ok(Some(ReplayEvents(id, after))) => {
+      assert_eq(id, "failed")
+      assert_eq(after, 1)
+    }
+    _ => fail("expected event replay action")
+  }
+  ignore(
+    @conversation.begin_turn(
+      connection, "active", "active-user", "chat", "hi", 5,
+    ),
+  )
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "POST",
+      "/v1/turns/active/retry",
+      {},
+      Map([]),
+      "unused",
+      6,
+    ) {
+    Err(error) => assert_eq(error.path, "turn.retry")
+    _ => fail("expected active retry rejection")
+  }
+  connection.close()
 }
 
 ///|

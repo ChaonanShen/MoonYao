@@ -669,42 +669,51 @@ async fn run_turn_inner(
       execution.metadata,
       started_at,
       deadline_at,
+      retry_of_turn_id=execution.retry_of_turn_id,
+      attempt=execution.attempt,
     ) {
     Ok(value) => value
     Err(error) => return Err(error)
   }
   let mut runtime : TurnRuntimeContext = { snapshot, connection, invoke, sink }
   let mut lifecycle = begin_lifecycle(snapshot)
-  match
-    @conversation.begin_turn(
-      connection,
-      ids.turn_id,
-      ids.user_message_id,
-      chat_id,
-      input,
-      now,
-      deadline_at=snapshot.deadline_at,
-    ) {
-    Ok(_) => ()
+  if !execution.prestarted {
+    match
+      @conversation.begin_turn(
+        connection,
+        ids.turn_id,
+        ids.user_message_id,
+        chat_id,
+        input,
+        now,
+        deadline_at=snapshot.deadline_at,
+        idempotency_key=execution.idempotency_key,
+        request_hash=execution.request_hash,
+        canonical_message=canonical_current,
+        retry_source_turn_id=execution.retry_source_turn_id,
+      ) {
+      Ok(_) => ()
+      Err(error) => return Err(error)
+    }
+  }
+  let persisted_turn = match @conversation.get_turn(connection, ids.turn_id) {
+    Ok(value) => value
     Err(error) => return Err(error)
   }
-  lifecycle = lifecycle.advance(Begun).unwrap()
-  match canonical_current {
-    Some(message) =>
-      match
-        @conversation.replace_canonical_message(
-          connection,
-          ids.user_message_id,
-          message,
-        ) {
-        Ok(_) => ()
-        Err(error) =>
-          return Err(
-            fail_active_turn(runtime, ids.assistant_message_id, error, now),
-          )
-      }
-    None => ()
+  if persisted_turn.chat_id != chat_id || persisted_turn.status != "active" {
+    return Err(@errors.turn_conflict())
   }
+  snapshot = {
+    ..snapshot,
+    retry_of_turn_id: if persisted_turn.retry_of_turn_id.length() > 0 {
+      Some(persisted_turn.retry_of_turn_id)
+    } else {
+      None
+    },
+    attempt: persisted_turn.attempt,
+  }
+  runtime = { ..runtime, snapshot, }
+  lifecycle = lifecycle.advance(Begun).unwrap()
   let stored = match @conversation.completed_messages(connection, chat_id) {
     Ok(value) => value
     Err(error) =>

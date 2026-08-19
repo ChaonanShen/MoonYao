@@ -798,6 +798,13 @@ pub fn public_event(
   }
   match event {
     @llm.Started => None
+    @llm.ProviderRetrying(attempt, max_attempts, delay_ms, reason) => {
+      base.set("attempt", Json::number(attempt.to_double()))
+      base.set("max_attempts", Json::number(max_attempts.to_double()))
+      base.set("delay_ms", Json::number(delay_ms.to_double()))
+      base.set("reason", Json::string(reason))
+      Some(("provider.retrying", Json::object(base)))
+    }
     @llm.TextDelta(delta) => {
       base.set("message_id", Json::string(message_id))
       base.set("delta", Json::string(delta))

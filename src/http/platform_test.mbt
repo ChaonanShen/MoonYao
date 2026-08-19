@@ -330,6 +330,21 @@ test "SSE frames escape data and expose only public runtime events" {
     }
     None => fail("expected public event")
   }
+  match
+    public_event(
+      @llm.ProviderRetrying(2, 3, 100, "server_error"),
+      3,
+      "chat",
+      "turn",
+      "message",
+    ) {
+    Some((name, data)) => {
+      assert_eq(name, "provider.retrying")
+      assert_true(data.stringify().contains("\"attempt\":2"))
+      assert_true(data.stringify().contains("\"reason\":\"server_error\""))
+    }
+    None => fail("expected provider retry event")
+  }
   assert_true(
     public_event(
       @llm.ToolArgumentsDelta(0, "secret"),

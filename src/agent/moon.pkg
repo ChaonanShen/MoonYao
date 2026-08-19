@@ -6,10 +6,10 @@ import {
   "ChaonanShen/MoonYao/model",
   "moonbitlang/core/json",
   "moonbitlang/core/env",
+  "moonbitlang/async",
   "moonbit-community/sqlite3",
 }
 
 import {
-  "moonbitlang/async",
   "ChaonanShen/MoonYao/attachment",
 } for "test"

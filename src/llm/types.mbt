@@ -51,6 +51,10 @@ pub(all) enum CompletionEvent {
   Usage(Usage)
   Completed
   Failed(String)
+  Cancelled
+  TimedOut
+  Interrupted
+  CancellationPendingProcess(String)
   ToolCallStarted(Int, String, String)
   ToolArgumentsDelta(Int, String)
   ToolCallCompleted(ToolCall)

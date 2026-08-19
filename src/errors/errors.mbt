@@ -12,6 +12,9 @@ pub(all) enum ErrorCode {
   DatabaseError
   ChatNotFound
   TurnConflict
+  TurnCancelled
+  TurnTimedOut
+  TurnInterrupted
   LlmError
   ToolError
   TurnLimitExceeded
@@ -42,6 +45,9 @@ pub fn ErrorCode::as_string(self : ErrorCode) -> String {
     DatabaseError => "database_error"
     ChatNotFound => "chat_not_found"
     TurnConflict => "turn_conflict"
+    TurnCancelled => "turn_cancelled"
+    TurnTimedOut => "turn_timed_out"
+    TurnInterrupted => "turn_interrupted"
     LlmError => "llm_error"
     ToolError => "tool_error"
     TurnLimitExceeded => "turn_limit_exceeded"
@@ -106,6 +112,21 @@ pub fn turn_conflict() -> EngineError {
     message: "chat already has an active turn",
     path: "chat",
   }
+}
+
+///|
+pub fn turn_cancelled() -> EngineError {
+  { code: TurnCancelled, message: "turn was cancelled", path: "turn" }
+}
+
+///|
+pub fn turn_timed_out() -> EngineError {
+  { code: TurnTimedOut, message: "turn deadline was exceeded", path: "turn" }
+}
+
+///|
+pub fn turn_interrupted() -> EngineError {
+  { code: TurnInterrupted, message: "turn was interrupted", path: "turn" }
 }
 
 ///|

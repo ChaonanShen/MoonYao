@@ -405,3 +405,45 @@ async test "cancelling provider retry stops interruptible backoff" {
     server.close()
   }
 }
+
+///|
+async test "cancelling an active provider read returns promptly" {
+  @async.with_task_group() <| group => {
+    let streaming = Ref(false)
+    let server = @http.Server(@socket.Addr::parse("127.0.0.1:0"))
+    group.spawn_bg(no_wait=true) <| () => {
+      server.run_forever(allow_failure=true) <| ((_, body, connection) => {
+        ignore(body.read_all())
+        connection.send_response(200, "OK", extra_headers={
+          "Content-Type": "text/event-stream",
+        })
+        connection.write_string(
+          "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        )
+        connection.flush()
+        streaming.val = true
+        @async.sleep(1000)
+      })
+    }
+    let task = group.spawn(allow_failure=true) <| () => {
+      complete_http_until(
+        retry_test_connector(server.addr.port(), "read-cancel"),
+        retry_test_request(),
+        "key",
+        _ => (),
+        @async.now() + 5000,
+      )
+    }
+    while !streaming.val {
+      @async.sleep(1)
+    }
+    let started = @async.now()
+    task.cancel()
+    ignore(task.wait()) catch {
+      error if @async.is_cancellation_error(error) => ()
+      _ => fail("expected provider read cancellation")
+    }
+    assert_true(@async.now() - started < 200)
+    server.close()
+  }
+}

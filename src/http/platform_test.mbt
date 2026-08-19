@@ -144,6 +144,37 @@ test "platform dispatcher implements agent and chat APIs" {
     dispatch_platform(
       agents,
       connection,
+      "GET",
+      "/v1/turns/turn",
+      {},
+      empty,
+      "unused",
+      5,
+    ) {
+    Ok(Some(Response(value))) => {
+      assert_eq(value.status, 200)
+      assert_true(value.body.contains("\"status\":\"active\""))
+    }
+    _ => fail("expected turn status response")
+  }
+  match
+    dispatch_platform(
+      agents,
+      connection,
+      "POST",
+      "/v1/turns/turn/cancel",
+      {},
+      empty,
+      "unused",
+      5,
+    ) {
+    Ok(Some(CancelTurn(id))) => assert_eq(id, "turn")
+    _ => fail("expected cancel action")
+  }
+  match
+    dispatch_platform(
+      agents,
+      connection,
       "DELETE",
       "/v1/chats/chat",
       {},
@@ -194,6 +225,8 @@ test "platform inputs and pagination are strict" {
     Ok(content) => {
       assert_eq(content.preview, "hello")
       assert_false(content.canonical)
+      assert_eq(content.timeout_ms, 300000)
+      assert_eq(content.metadata, Json::object(Map([])))
     }
     Err(error) => fail(error.message)
   }
@@ -204,6 +237,29 @@ test "platform inputs and pagination are strict" {
   match turn_input({ "content": "月".repeat(21846) }) {
     Err(error) => assert_eq(error.path, "body.content")
     Ok(_) => fail("expected UTF-8 byte limit")
+  }
+  match
+    turn_input({
+      "content": "hello",
+      "options": { "timeout_ms": 120000, "metadata": { "source": "test" } },
+    }) {
+    Ok(content) => {
+      assert_eq(content.timeout_ms, 120000)
+      assert_eq(content.metadata, ({ "source": "test" } : Json))
+    }
+    Err(error) => fail(error.message)
+  }
+  for invalid in [999, 300001] {
+    match
+      turn_input({ "content": "hello", "options": { "timeout_ms": invalid } }) {
+      Err(error) => assert_eq(error.path, "body.options.timeout_ms")
+      Ok(_) => fail("expected timeout bound rejection")
+    }
+  }
+  match
+    turn_input({ "content": "hello", "options": { "metadata": "private" } }) {
+    Err(error) => assert_eq(error.path, "body.options.metadata")
+    Ok(_) => fail("expected metadata object")
   }
 }
 

@@ -422,6 +422,15 @@ pub async fn run_turn(
     existing_chat_id,
     input,
     None,
+    messages => {
+      @llm.project_messages(messages, _ => {
+        Err(
+          @errors.invalid_argument(
+            "Create introduced an attachment without a resolver", "create.messages",
+          ),
+        )
+      })
+    },
     ids,
     now,
     invoke,
@@ -439,7 +448,10 @@ pub async fn run_turn_message(
   existing_chat_id : String?,
   input : @content.Message,
   preview : String,
-  wire_message : Json,
+  project : (Array[@content.Message]) -> Result[
+    Array[Json],
+    @errors.EngineError,
+  ],
   ids : Ids,
   now : Int64,
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
@@ -459,7 +471,8 @@ pub async fn run_turn_message(
     client,
     existing_chat_id,
     preview,
-    Some((input, wire_message)),
+    Some(input),
+    project,
     ids,
     now,
     invoke,
@@ -475,7 +488,11 @@ async fn run_turn_inner(
   client : Client,
   existing_chat_id : String?,
   input : String,
-  canonical_current : (@content.Message, Json)?,
+  canonical_current : @content.Message?,
+  project : (Array[@content.Message]) -> Result[
+    Array[Json],
+    @errors.EngineError,
+  ],
   ids : Ids,
   now : Int64,
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
@@ -514,7 +531,7 @@ async fn run_turn_inner(
       ids.chat_id
     }
   }
-  let snapshot = match
+  let mut snapshot = match
     context_snapshot(
       "ctx_" + ids.turn_id,
       "req_" + ids.turn_id,
@@ -529,7 +546,7 @@ async fn run_turn_inner(
     Ok(value) => value
     Err(error) => return Err(error)
   }
-  let runtime : TurnRuntimeContext = { snapshot, connection, invoke, sink }
+  let mut runtime : TurnRuntimeContext = { snapshot, connection, invoke, sink }
   let mut lifecycle = begin_lifecycle(snapshot)
   match
     @conversation.begin_turn(
@@ -545,7 +562,7 @@ async fn run_turn_inner(
   }
   lifecycle = lifecycle.advance(Begun).unwrap()
   match canonical_current {
-    Some((message, _)) =>
+    Some(message) =>
       match
         @conversation.replace_canonical_message(
           connection,
@@ -576,10 +593,119 @@ async fn run_turn_inner(
   }
   lifecycle = lifecycle.advance(HistoryLoaded).unwrap()
   let messages = history.messages.copy()
-  let canonical_index = messages.length() - 1
+  let canonical_messages = messages.map(canonical_from_chat)
+  match canonical_current {
+    Some(message) =>
+      canonical_messages[canonical_messages.length() - 1] = message
+    None => ()
+  }
+  let mut canonical_base_count = 0
+  let mut canonical_wire : Array[Json]? = None
+  let mut request_temperature = agent.options.temperature
+  let mut request_max_tokens = agent.options.max_tokens
   let mut metadata : Json = Json::object(Map([]))
   let all_events : Array[@llm.CompletionEvent] = []
   lifecycle = lifecycle.advance(Creating).unwrap()
+  if agent.create_process.length() > 0 {
+    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
+      let error = @errors.turn_limit_exceeded("turn deadline exceeded")
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
+    }
+    let started = @llm.HookStarted("create")
+    sink(started)
+    all_events.push(started)
+    let output = match
+      invoke(
+        agent.create_process,
+        create_input_json(
+          snapshot,
+          canonical_messages,
+          connector.id,
+          request_temperature,
+          request_max_tokens,
+        ),
+      ) {
+      Ok(value) => value
+      Err(error) =>
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
+    }
+    if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
+      let error = @errors.turn_limit_exceeded(
+        "turn deadline exceeded after Create hook",
+      )
+      return Err(
+        fail_active_turn(runtime, ids.assistant_message_id, error, now),
+      )
+    }
+    let decision = match
+      apply_create_decision(
+        output,
+        canonical_messages,
+        connector.id,
+        request_temperature,
+        request_max_tokens,
+        snapshot,
+      ) {
+      Ok(value) => value
+      Err(error) =>
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
+    }
+    snapshot = decision.context
+    runtime = { ..runtime, snapshot, }
+    metadata = snapshot.metadata
+    request_temperature = decision.temperature
+    request_max_tokens = decision.max_tokens
+    match
+      @conversation.save_create_snapshot(
+        connection,
+        ids.turn_id,
+        context_json(snapshot),
+        decision.snapshot,
+      ) {
+      Err(error) =>
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
+      Ok(_) => ()
+    }
+    let projected = match project(decision.messages) {
+      Ok(value) => value
+      Err(error) =>
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
+    }
+    messages.clear()
+    for message in decision.messages {
+      messages.push(chat_from_canonical(message))
+    }
+    canonical_base_count = messages.length()
+    canonical_wire = Some(projected)
+    let completed = @llm.HookCompleted("create")
+    sink(completed)
+    all_events.push(completed)
+  } else {
+    match canonical_current {
+      Some(_) => {
+        let projected = match project(canonical_messages) {
+          Ok(value) => value
+          Err(error) =>
+            return Err(
+              fail_active_turn(runtime, ids.assistant_message_id, error, now),
+            )
+        }
+        canonical_base_count = messages.length()
+        canonical_wire = Some(projected)
+      }
+      None => ()
+    }
+  }
   if agent.before_process.length() > 0 {
     if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
       let error = @errors.turn_limit_exceeded("turn deadline exceeded")
@@ -687,16 +813,20 @@ async fn run_turn_inner(
     let request : @llm.ChatRequest = {
       model: connector.model,
       messages: messages.copy(),
-      wire_messages: match canonical_current {
-        Some((_, wire_current)) => {
-          let wire = @llm.chat_messages_json(messages)
-          wire[canonical_index] = wire_current
+      wire_messages: match canonical_wire {
+        Some(base) => {
+          let wire = base.copy()
+          for index = canonical_base_count
+              index < messages.length()
+              index = index + 1 {
+            wire.push(@llm.chat_messages_json([messages[index]])[0])
+          }
           Some(wire)
         }
         None => None
       },
-      temperature: agent.options.temperature,
-      max_tokens: agent.options.max_tokens,
+      temperature: request_temperature,
+      max_tokens: request_max_tokens,
       stream: true,
       tools: definitions,
     }

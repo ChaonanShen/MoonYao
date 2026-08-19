@@ -552,63 +552,55 @@ async fn run_http_turn(
     application.flows,
     application.globals,
   )
-  let wire_message : Json? = if content.canonical {
-    match
-      @llm.project_messages([content.message], attachment_id => {
-        let metadata = match @attachment.get(database, attachment_id) {
-          Ok(value) => value
-          Err(error) => return Err(error)
-        }
-        let data = match @attachment.read_local(attachment_root, metadata) {
-          Ok(value) => value
-          Err(error) => return Err(error)
-        }
-        Ok({
-          id: metadata.id,
-          filename: metadata.filename,
-          media_type: metadata.media_type,
-          data,
-        })
-      }) {
-      Ok(values) => Some(values[0])
-      Err(error) => {
-        send_platform_error(connection, error, id)
-        return
+  let project = fn(
+    messages : Array[@content.Message],
+  ) -> Result[Array[Json], @errors.EngineError] {
+    @llm.project_messages(messages, attachment_id => {
+      let metadata = match @attachment.get(database, attachment_id) {
+        Ok(value) => value
+        Err(error) => return Err(error)
       }
-    }
-  } else {
-    None
+      let data = match @attachment.read_local(attachment_root, metadata) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
+      Ok({
+        id: metadata.id,
+        filename: metadata.filename,
+        media_type: metadata.media_type,
+        data,
+      })
+    })
   }
   if !stream {
-    let result = match wire_message {
-      Some(wire) =>
-        @agent.run_turn_message(
-          database,
-          selected,
-          connector,
-          @agent.OpenAI(connector, api_key),
-          Some(chat_id),
-          content.message,
-          content.preview,
-          wire,
-          ids,
-          @env.now().reinterpret_as_int64(),
-          (process, input) => registry.run(database, process, input),
-          _ => (),
-        )
-      None =>
-        @agent.run_turn(
-          database,
-          selected,
-          connector,
-          @agent.OpenAI(connector, api_key),
-          Some(chat_id),
-          content.preview,
-          ids,
-          @env.now().reinterpret_as_int64(),
-          (process, input) => registry.run(database, process, input),
-          _ => (),
-        )
+    let result = if content.canonical {
+      @agent.run_turn_message(
+        database,
+        selected,
+        connector,
+        @agent.OpenAI(connector, api_key),
+        Some(chat_id),
+        content.message,
+        content.preview,
+        project,
+        ids,
+        @env.now().reinterpret_as_int64(),
+        (process, input) => registry.run(database, process, input),
+        _ => (),
+      )
+    } else {
+      @agent.run_turn(
+        database,
+        selected,
+        connector,
+        @agent.OpenAI(connector, api_key),
+        Some(chat_id),
+        content.preview,
+        ids,
+        @env.now().reinterpret_as_int64(),
+        (process, input) => registry.run(database, process, input),
+        _ => (),
+      )
     }
     match result {
       Err(error) => send_platform_error(connection, error, id)
@@ -724,35 +716,34 @@ async fn run_http_turn(
         None => ()
       }
     }
-    let result = match wire_message {
-      Some(wire) =>
-        @agent.run_turn_message(
-          database,
-          selected,
-          connector,
-          @agent.OpenAI(connector, api_key),
-          Some(chat_id),
-          content.message,
-          content.preview,
-          wire,
-          ids,
-          @env.now().reinterpret_as_int64(),
-          (process, input) => registry.run(database, process, input),
-          event_sink,
-        )
-      None =>
-        @agent.run_turn(
-          database,
-          selected,
-          connector,
-          @agent.OpenAI(connector, api_key),
-          Some(chat_id),
-          content.preview,
-          ids,
-          @env.now().reinterpret_as_int64(),
-          (process, input) => registry.run(database, process, input),
-          event_sink,
-        )
+    let result = if content.canonical {
+      @agent.run_turn_message(
+        database,
+        selected,
+        connector,
+        @agent.OpenAI(connector, api_key),
+        Some(chat_id),
+        content.message,
+        content.preview,
+        project,
+        ids,
+        @env.now().reinterpret_as_int64(),
+        (process, input) => registry.run(database, process, input),
+        event_sink,
+      )
+    } else {
+      @agent.run_turn(
+        database,
+        selected,
+        connector,
+        @agent.OpenAI(connector, api_key),
+        Some(chat_id),
+        content.preview,
+        ids,
+        @env.now().reinterpret_as_int64(),
+        (process, input) => registry.run(database, process, input),
+        event_sink,
+      )
     }
     match result {
       Ok(value) => {

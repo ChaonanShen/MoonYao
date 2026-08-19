@@ -12,6 +12,7 @@ async test "fake client runs three persisted turns and restart-compatible histor
     prompts: [{ role: @llm.System, content: "Be concise." }],
     tools: [],
     tool_names: [],
+    create_process: "",
     before_process: "",
     after_process: "",
   }
@@ -117,6 +118,7 @@ async test "canonical turn persists multipart input and attachment references" {
         prompts: [],
         tools: [],
         tool_names: [],
+        create_process: "",
         before_process: "",
         after_process: "",
       },
@@ -137,7 +139,13 @@ async test "canonical turn persists multipart input and attachment references" {
       None,
       message,
       "Read this [File: notes.txt]",
-      wire,
+      messages => {
+        if messages == [message] {
+          Ok([wire])
+        } else {
+          Err(@errors.internal_error("unexpected projection input", "test"))
+        }
+      },
       {
         chat_id: "canonical-chat",
         turn_id: "canonical-turn",
@@ -169,6 +177,160 @@ async test "canonical turn persists multipart input and attachment references" {
 }
 
 ///|
+async test "Create hook receives canonical input and persists its decision" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let attachment : @attachment.Attachment = {
+    id: "att_createabcdefghijkl",
+    storage_key: "cr/att_createabcdefghijkl",
+    filename: "pixel.png",
+    media_type: "image/png",
+    byte_size: 8,
+    sha256: "digest",
+    kind: @attachment.Image,
+    status: "ready",
+    created_at: 1,
+    deleted_at: 0,
+  }
+  ignore(@attachment.insert(connection, attachment))
+  let message : @content.Message = {
+    role: @content.User,
+    content: Some(
+      @content.Parts([
+        @content.TextPart("Describe"),
+        @content.ImageRef(attachment.id, @content.Auto),
+      ]),
+    ),
+    name: None,
+    tool_call_id: None,
+    reasoning_content: None,
+    tool_calls: [],
+    refusal: None,
+  }
+  let agent : Agent = {
+    id: "todo",
+    name: "Todo",
+    description: "",
+    connector: "default",
+    options: { temperature: 0.2, max_tokens: 128 },
+    prompts: [],
+    tools: [],
+    tool_names: [],
+    create_process: "flows.create",
+    before_process: "",
+    after_process: "",
+  }
+  let mut saw_input = false
+  let mut saw_projection = false
+  let events : Array[@llm.CompletionEvent] = []
+  match
+    run_turn_message(
+      connection,
+      agent,
+      {
+        id: "default",
+        connector_type: "openai_chat",
+        base_url: "http://127.0.0.1:1/v1",
+        api_key_env: "TEST_KEY",
+        model: "fake",
+        timeout_ms: 1000,
+      },
+      Client::Fake(fake_text_response("created")),
+      None,
+      message,
+      "Describe [Image]",
+      messages => {
+        saw_projection = messages ==
+          [@content.text_message(@content.User, "rewritten")]
+        Ok([{ "role": "user", "content": "rewritten" }])
+      },
+      {
+        chat_id: "create-chat",
+        turn_id: "create-turn",
+        user_message_id: "create-user",
+        assistant_message_id: "create-assistant",
+      },
+      1,
+      (process, input) => {
+        saw_input = process == "flows.create" &&
+          input.stringify().contains("\"version\":1") &&
+          input.stringify().contains(attachment.id) &&
+          input.stringify().contains("\"temperature\":0.2")
+        Ok(
+          (
+            {
+              "messages": [{ "role": "user", "content": "rewritten" }],
+              "generation": { "temperature": 0.1, "max_tokens": 64 },
+              "context": {
+                "locale": "zh-CN",
+                "metadata": { "source": "create-test" },
+              },
+            } : Json),
+        )
+      },
+      event => events.push(event),
+    ) {
+    Ok(result) => assert_eq(result.content, "created")
+    Err(error) => fail(error.message)
+  }
+  assert_true(saw_input)
+  assert_true(saw_projection)
+  assert_true(events.contains(@llm.HookStarted("create")))
+  assert_true(events.contains(@llm.HookCompleted("create")))
+  match @conversation.create_snapshot(connection, "create-turn") {
+    Ok((context, decision)) => {
+      assert_true(context.stringify().contains("\"locale\":\"zh-CN\""))
+      assert_true(decision.stringify().contains("\"max_tokens\":64"))
+    }
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}
+
+///|
+async test "Create Process failure finalizes the active turn once" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let agent : Agent = {
+    ..tool_test_agent(),
+    tools: [],
+    tool_names: [],
+    create_process: "flows.create",
+  }
+  let events : Array[@llm.CompletionEvent] = []
+  match
+    run_turn(
+      connection,
+      agent,
+      tool_test_connector(),
+      Client::Fake(fake_text_response("unused")),
+      None,
+      "hello",
+      tool_test_ids("create-failure"),
+      1,
+      (_, _) => Err(@errors.tool_error("Create failed")),
+      event => events.push(event),
+    ) {
+    Err(error) => assert_eq(error.code, @errors.ToolError)
+    Ok(_) => fail("expected Create failure")
+  }
+  match @conversation.active_turn_id(connection, "chat-create-failure") {
+    Ok(value) => assert_eq(value, "")
+    Err(error) => fail(error.message)
+  }
+  let mut failures = 0
+  for event in events {
+    if event is @llm.Failed(_) {
+      failures = failures + 1
+    }
+  }
+  assert_eq(failures, 1)
+  connection.close()
+}
+
+///|
 async test "twenty sequential turns leave no active turn" {
   ignore(@async.now())
   let connection = @sqlite3.Connection::open(":memory:")
@@ -182,6 +344,7 @@ async test "twenty sequential turns leave no active turn" {
     prompts: [{ role: @llm.System, content: "Be concise." }],
     tools: [],
     tool_names: [],
+    create_process: "",
     before_process: "",
     after_process: "",
   }
@@ -260,6 +423,7 @@ async fn run_concurrent_chat_smoke(suffix : String) -> Unit {
         prompts: [],
         tools: [],
         tool_names: [],
+        create_process: "",
         before_process: "",
         after_process: "",
       },
@@ -420,6 +584,7 @@ async test "invalid current input has no database side effects" {
     prompts: [{ role: @llm.System, content: "system" }],
     tools: [],
     tool_names: [],
+    create_process: "",
     before_process: "",
     after_process: "",
   }
@@ -496,6 +661,7 @@ fn tool_test_agent() -> Agent {
       },
     ],
     tool_names: ["create_todo"],
+    create_process: "",
     before_process: "",
     after_process: "",
   }
@@ -818,6 +984,7 @@ async test "optional Process hooks can rewrite input and finish output" {
     ..tool_test_agent(),
     tools: [],
     tool_names: [],
+    create_process: "",
     before_process: "flows.before",
     after_process: "flows.after",
   }

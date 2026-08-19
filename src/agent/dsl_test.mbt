@@ -28,12 +28,15 @@ test "agent and prompt DSL accept the documented shape" {
         "id": "todo",
         "name": "Todo",
         "connector": "default",
-        "hooks": { "create": "flows.create" },
+        "hooks": { "create": "flows.create", "next": "flows.next" },
       },
       "todo",
       "agents/todo/agent.json",
     ) {
-    Ok(agent) => assert_eq(agent.create_process, "flows.create")
+    Ok(agent) => {
+      assert_eq(agent.create_process, "flows.create")
+      assert_eq(agent.next_process, "flows.next")
+    }
     Err(error) => fail(error.message)
   }
 }
@@ -85,5 +88,20 @@ test "agent DSL rejects directory mismatch, duplicate tools, and non-system prom
     ) {
     Err(error) => assert_eq(error.path, "agents/todo/agent.json.hooks.create")
     Ok(_) => fail("expected new and legacy hook conflict")
+  }
+  match
+    parse_agent(
+      {
+        "id": "todo",
+        "name": "Todo",
+        "connector": "default",
+        "hooks": { "next": "flows.next" },
+        "after_process": "flows.after",
+      },
+      "todo",
+      "agents/todo/agent.json",
+    ) {
+    Err(error) => assert_eq(error.path, "agents/todo/agent.json.hooks.next")
+    Ok(_) => fail("expected Next and legacy after hook conflict")
   }
 }

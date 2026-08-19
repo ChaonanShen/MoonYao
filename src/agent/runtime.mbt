@@ -17,6 +17,7 @@ pub(all) struct TurnResult {
   chat_id : String
   turn_id : String
   content : String
+  next : Json?
   events : Array[@llm.CompletionEvent]
   history_truncated : Bool
   usage : @llm.Usage
@@ -803,6 +804,7 @@ async fn run_turn_inner(
   let mut continuation_count = 0
   let mut prompt_tokens = 0
   let mut completion_tokens = 0
+  let tool_results : Array[NextToolResult] = []
   while round < 8 {
     if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
       let error = @errors.turn_limit_exceeded("turn deadline exceeded")
@@ -911,6 +913,10 @@ async fn run_turn_inner(
               ),
             )
         }
+        let next_arguments = match arguments {
+          Ok(value) => value
+          Err(_) => Json::null()
+        }
         let execution = match arguments {
           Err(error) => Err(error)
           Ok(value) =>
@@ -962,6 +968,21 @@ async fn run_turn_inner(
           }
         }
         let result_json = tool_result_message(call, ok, payload)
+        tool_results.push({
+          tool_call_id: call.id,
+          name: call.name,
+          arguments: next_arguments,
+          result: if ok {
+            Some(payload)
+          } else {
+            None
+          },
+          error: if ok {
+            None
+          } else {
+            Some(payload)
+          },
+        })
         match
           @conversation.append_message(
             connection,
@@ -1006,7 +1027,68 @@ async fn run_turn_inner(
       )
     }
     let mut final_content = content
-    if agent.after_process.length() > 0 {
+    let total_usage : @llm.Usage = { prompt_tokens, completion_tokens }
+    let mut next_data : Json? = None
+    if agent.next_process.length() > 0 {
+      lifecycle = lifecycle.advance(Next).unwrap()
+      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
+        let error = @errors.turn_limit_exceeded("turn deadline exceeded")
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
+      }
+      let started = @llm.HookStarted("next")
+      sink(started)
+      all_events.push(started)
+      let output = match
+        invoke(
+          agent.next_process,
+          next_input_json(
+            snapshot, canonical_messages, content, total_usage, tool_results,
+          ),
+        ) {
+        Ok(value) => value
+        Err(error) =>
+          return Err(
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
+          )
+      }
+      if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
+        let error = @errors.turn_limit_exceeded(
+          "turn deadline exceeded after Next hook",
+        )
+        return Err(
+          fail_active_turn(runtime, ids.assistant_message_id, error, now),
+        )
+      }
+      let decision = match apply_next_decision(output, snapshot) {
+        Ok(value) => value
+        Err(error) =>
+          return Err(
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
+          )
+      }
+      snapshot = decision.context
+      runtime = { ..runtime, snapshot, }
+      metadata = snapshot.metadata
+      next_data = decision.data
+      match
+        @conversation.save_next_snapshot(
+          connection,
+          ids.turn_id,
+          context_json(snapshot),
+          decision.snapshot,
+        ) {
+        Err(error) =>
+          return Err(
+            fail_active_turn(runtime, ids.assistant_message_id, error, now),
+          )
+        Ok(_) => ()
+      }
+      let completed = @llm.HookCompleted("next")
+      sink(completed)
+      all_events.push(completed)
+    } else if agent.after_process.length() > 0 {
       if @env.now().reinterpret_as_int64() > snapshot.deadline_at {
         let error = @errors.turn_limit_exceeded("turn deadline exceeded")
         return Err(
@@ -1087,8 +1169,9 @@ async fn run_turn_inner(
         }
       }
     }
-    lifecycle = lifecycle.advance(Next).unwrap()
-    let total_usage : @llm.Usage = { prompt_tokens, completion_tokens }
+    if agent.next_process.length() == 0 {
+      lifecycle = lifecycle.advance(Next).unwrap()
+    }
     lifecycle = lifecycle.advance(Finalizing).unwrap()
     match
       finalize_turn(
@@ -1103,6 +1186,7 @@ async fn run_turn_inner(
           chat_id,
           turn_id: ids.turn_id,
           content: final_content,
+          next: next_data,
           events: all_events,
           history_truncated: history.truncated,
           usage: total_usage,

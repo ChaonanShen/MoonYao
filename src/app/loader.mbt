@@ -367,6 +367,7 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
         for
           hook in [
             ("hooks.create", parsed.create_process),
+            ("hooks.next", parsed.next_process),
             ("before_process", parsed.before_process),
             ("after_process", parsed.after_process),
           ] {
@@ -390,6 +391,7 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
           tools,
           tool_names: parsed.tool_names,
           create_process: parsed.create_process,
+          next_process: parsed.next_process,
           before_process: parsed.before_process,
           after_process: parsed.after_process,
         })

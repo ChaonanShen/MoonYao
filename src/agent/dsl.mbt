@@ -15,6 +15,7 @@ pub(all) struct Agent {
   tools : Array[Tool]
   tool_names : Array[String]
   create_process : String
+  next_process : String
   before_process : String
   after_process : String
 } derive(Debug)
@@ -171,14 +172,14 @@ pub fn parse_agent(
         ),
       )
   }
-  let create_process = match object.get("hooks") {
-    None => ""
+  let (create_process, next_process) = match object.get("hooks") {
+    None => ("", "")
     Some(Object(hooks)) => {
-      match known_keys(hooks, ["create"], path + ".hooks") {
+      match known_keys(hooks, ["create", "next"], path + ".hooks") {
         Err(error) => return Err(error)
         Ok(_) => ()
       }
-      match hooks.get("create") {
+      let create = match hooks.get("create") {
         Some(String(value)) if value.length() > 0 => value
         Some(_) =>
           return Err(
@@ -189,6 +190,18 @@ pub fn parse_agent(
           )
         None => ""
       }
+      let next = match hooks.get("next") {
+        Some(String(value)) if value.length() > 0 => value
+        Some(_) =>
+          return Err(
+            @errors.invalid_dsl(
+              "expected a non-empty string",
+              path + ".hooks.next",
+            ),
+          )
+        None => ""
+      }
+      (create, next)
     }
     Some(_) =>
       return Err(@errors.invalid_dsl("expected an object", path + ".hooks"))
@@ -212,6 +225,14 @@ pub fn parse_agent(
         ),
       )
   }
+  if next_process.length() > 0 && after_process.length() > 0 {
+    return Err(
+      @errors.invalid_dsl(
+        "hooks.next cannot be combined with after_process",
+        path + ".hooks.next",
+      ),
+    )
+  }
   Ok({
     id,
     name,
@@ -222,6 +243,7 @@ pub fn parse_agent(
     tools: [],
     tool_names,
     create_process,
+    next_process,
     before_process,
     after_process,
   })

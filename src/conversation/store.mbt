@@ -136,7 +136,10 @@ pub fn migrate(
       }
     }
   }
-  migrate_v3(connection)
+  match migrate_v3(connection) {
+    Err(error) => Err(error)
+    Ok(_) => migrate_v4(connection)
+  }
 }
 
 ///|

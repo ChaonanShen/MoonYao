@@ -16,6 +16,7 @@ fn platform_agent() -> @agent.Agent {
       },
     ],
     tool_names: ["create_todo"],
+    create_process: "",
     before_process: "flows.private",
     after_process: "",
   }

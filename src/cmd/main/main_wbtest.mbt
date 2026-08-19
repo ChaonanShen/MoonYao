@@ -61,6 +61,7 @@ fn tcp_test_agent() -> @agent.Agent {
     prompts: [{ role: @llm.System, content: "private" }],
     tools: [],
     tool_names: [],
+    create_process: "",
     before_process: "",
     after_process: "",
   }

@@ -14,6 +14,7 @@ pub(all) struct Agent {
   prompts : Array[@llm.ChatMessage]
   tools : Array[Tool]
   tool_names : Array[String]
+  create_process : String
   before_process : String
   after_process : String
 } derive(Debug)
@@ -60,7 +61,7 @@ pub fn parse_agent(
       object,
       [
         "id", "name", "description", "connector", "options", "tools", "before_process",
-        "after_process",
+        "after_process", "hooks",
       ],
       path,
     ) {
@@ -170,6 +171,36 @@ pub fn parse_agent(
         ),
       )
   }
+  let create_process = match object.get("hooks") {
+    None => ""
+    Some(Object(hooks)) => {
+      match known_keys(hooks, ["create"], path + ".hooks") {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      match hooks.get("create") {
+        Some(String(value)) if value.length() > 0 => value
+        Some(_) =>
+          return Err(
+            @errors.invalid_dsl(
+              "expected a non-empty string",
+              path + ".hooks.create",
+            ),
+          )
+        None => ""
+      }
+    }
+    Some(_) =>
+      return Err(@errors.invalid_dsl("expected an object", path + ".hooks"))
+  }
+  if create_process.length() > 0 && before_process.length() > 0 {
+    return Err(
+      @errors.invalid_dsl(
+        "hooks.create cannot be combined with before_process",
+        path + ".hooks.create",
+      ),
+    )
+  }
   let after_process = match object.get("after_process") {
     None => ""
     Some(String(value)) if value.length() > 0 => value
@@ -190,6 +221,7 @@ pub fn parse_agent(
     prompts: [],
     tools: [],
     tool_names,
+    create_process,
     before_process,
     after_process,
   })

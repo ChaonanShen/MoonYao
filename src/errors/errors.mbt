@@ -115,6 +115,20 @@ pub fn turn_conflict() -> EngineError {
 }
 
 ///|
+pub fn turn_retry_conflict(message : String) -> EngineError {
+  { code: TurnConflict, message, path: "turn.retry" }
+}
+
+///|
+pub fn idempotency_conflict() -> EngineError {
+  {
+    code: TurnConflict,
+    message: "Idempotency-Key was already used for a different request",
+    path: "headers.idempotency-key",
+  }
+}
+
+///|
 pub fn turn_cancelled() -> EngineError {
   { code: TurnCancelled, message: "turn was cancelled", path: "turn" }
 }

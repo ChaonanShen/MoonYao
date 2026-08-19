@@ -213,3 +213,57 @@ pub fn next_snapshot(
     }
   }
 }
+
+///|
+fn completion_next_data(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+) -> Result[Json, @errors.EngineError] {
+  let statement = connection.prepare(
+    "SELECT next_json FROM _moonyao_turn_lifecycle WHERE turn_id = ?",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error(
+          "could not prepare completion Next data", "turn.lifecycle",
+        ),
+      )
+  }
+  let source : String = try {
+    statement.bind(index=1, turn_id)
+    let value : String = if statement.step() {
+      statement.column(index=0)
+    } else {
+      "null"
+    }
+    statement.finalize()
+    value
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      return Err(
+        @errors.database_error(
+          "could not read completion Next data", "turn.lifecycle",
+        ),
+      )
+    }
+  }
+  let decision = @json.parse(source) catch {
+    _ =>
+      return Err(
+        @errors.database_error(
+          "turn Next snapshot is invalid", "turn.lifecycle",
+        ),
+      )
+  }
+  match decision {
+    Object(object) =>
+      match (object.get("action"), object.get("data")) {
+        (Some(String("data")), Some(data)) => Ok(data)
+        _ => Ok(Json::null())
+      }
+    _ => Ok(Json::null())
+  }
+}

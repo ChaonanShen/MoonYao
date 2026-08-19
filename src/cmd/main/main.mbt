@@ -496,6 +496,117 @@ async fn send_platform_error(
 }
 
 ///|
+fn terminal_event(event : String) -> Bool {
+  [
+    "turn.completed", "turn.failed", "turn.cancelled", "turn.timed_out", "turn.interrupted",
+  ].contains(event)
+}
+
+///|
+async fn stream_turn_events(
+  database : @sqlite3.Connection,
+  turn_id : String,
+  after : Int,
+  connection : @asynchttp.ServerConnection,
+  id : String,
+) -> Unit {
+  let headers = platform_headers("text/event-stream; charset=utf-8", id)
+  headers.set("Connection", "keep-alive")
+  headers.set("X-Accel-Buffering", "no")
+  connection.send_response(200, "OK", extra_headers=headers)
+  connection.flush()
+  let mut cursor = after
+  let mut open = true
+  let mut done = false
+  let mut last_write = @env.now()
+  while open && !done {
+    let events = match
+      @conversation.list_events(database, turn_id, cursor, 1000) {
+      Ok(value) => value
+      Err(_) => []
+    }
+    if !events.is_empty() {
+      try {
+        for event in events {
+          connection.write_string(
+            @moonhttp.turn_sse_frame(
+              turn_id,
+              event.sequence,
+              event.event,
+              event.data,
+            ),
+          )
+          cursor = event.sequence
+          if terminal_event(event.event) {
+            done = true
+          }
+        }
+        connection.flush()
+        last_write = @env.now()
+      } catch {
+        _ => open = false
+      }
+    } else {
+      let turn_done = match @conversation.get_turn(database, turn_id) {
+        Ok(turn) => turn.status != "active"
+        Err(_) => true
+      }
+      if turn_done {
+        done = true
+      } else {
+        @async.sleep(25)
+        if @env.now() - last_write >= 15000 {
+          try {
+            connection.write_string(@moonhttp.heartbeat())
+            connection.flush()
+            last_write = @env.now()
+          } catch {
+            _ => open = false
+          }
+        }
+      }
+    }
+  }
+  if open {
+    connection.end_response() catch {
+      _ => ()
+    }
+  }
+}
+
+///|
+async fn send_existing_turn(
+  database : @sqlite3.Connection,
+  turn : @conversation.Turn,
+  stream : Bool,
+  connection : @asynchttp.ServerConnection,
+  id : String,
+) -> Unit {
+  if stream {
+    stream_turn_events(database, turn.id, 0, connection, id)
+  } else {
+    send_platform_response(
+      connection,
+      {
+        status: 200,
+        content_type: "application/json; charset=utf-8",
+        body: @moonhttp.success({
+          "turn": @moonhttp.turn_json(turn),
+          "idempotent_replay": true,
+          "side_effect_warning": if turn.retry_of_turn_id.length() > 0 {
+            Json::string("Retry may repeat Process side effects")
+          } else {
+            Json::null()
+          },
+        }).stringify(),
+        location: "",
+      },
+      id,
+    )
+  }
+}
+
+///|
 async fn run_http_turn(
   application : @app.Application,
   database : @sqlite3.Connection,
@@ -503,6 +614,8 @@ async fn run_http_turn(
   content : @moonhttp.TurnInput,
   attachment_root : String,
   stream : Bool,
+  idempotency_key : String,
+  retry_source_turn_id : String,
   connection : @asynchttp.ServerConnection,
   id : String,
   supervisor : @agent.TurnSupervisor,
@@ -551,6 +664,79 @@ async fn run_http_turn(
     user_message_id: fresh_id(),
     assistant_message_id: fresh_id(),
   }
+  if idempotency_key.length() > 0 {
+    match @moonhttp.validate_idempotency_key(idempotency_key) {
+      Err(error) => {
+        send_platform_error(connection, error, id)
+        return
+      }
+      Ok(_) => ()
+    }
+  }
+  let request_hash = @moonhttp.turn_request_hash(content, retry_source_turn_id)
+  if idempotency_key.length() > 0 {
+    match
+      @conversation.get_turn_by_idempotency(database, chat_id, idempotency_key) {
+      Err(error) => {
+        send_platform_error(connection, error, id)
+        return
+      }
+      Ok(Some(turn)) => {
+        if turn.request_hash != request_hash {
+          send_platform_error(connection, @errors.idempotency_conflict(), id)
+        } else {
+          send_existing_turn(database, turn, stream, connection, id)
+        }
+        return
+      }
+      Ok(None) => ()
+    }
+  }
+  let started_at = @env.now().reinterpret_as_int64()
+  let deadline_at = started_at + content.timeout_ms.to_int64()
+  match
+    @conversation.begin_turn(
+      database,
+      ids.turn_id,
+      ids.user_message_id,
+      chat_id,
+      content.preview,
+      started_at,
+      deadline_at~,
+      idempotency_key~,
+      request_hash~,
+      canonical_message=Some(content.message),
+      retry_source_turn_id~,
+    ) {
+    Err(error) => {
+      if idempotency_key.length() > 0 {
+        match
+          @conversation.get_turn_by_idempotency(
+            database, chat_id, idempotency_key,
+          ) {
+          Ok(Some(turn)) if turn.request_hash == request_hash => {
+            send_existing_turn(database, turn, stream, connection, id)
+            return
+          }
+          Ok(Some(_)) => {
+            send_platform_error(connection, @errors.idempotency_conflict(), id)
+            return
+          }
+          _ => ()
+        }
+      }
+      send_platform_error(connection, error, id)
+      return
+    }
+    Ok(_) => ()
+  }
+  let persisted_turn = match @conversation.get_turn(database, ids.turn_id) {
+    Ok(value) => value
+    Err(error) => {
+      send_platform_error(connection, error, id)
+      return
+    }
+  }
   if chat.title.length() == 0 {
     match
       @conversation.rename_chat(
@@ -592,330 +778,171 @@ async fn run_http_turn(
     })
   }
   let cancellation = @agent.TurnCancellation::new()
-  let deadline_at = @env.now().reinterpret_as_int64() +
-    content.timeout_ms.to_int64()
   let execution : @agent.TurnExecutionOptions = {
     cancellation,
     deadline_at,
     metadata: content.metadata,
+    prestarted: true,
+    retry_source_turn_id,
+    retry_of_turn_id: persisted_turn.retry_of_turn_id,
+    attempt: persisted_turn.attempt,
+    idempotency_key,
+    request_hash,
   }
-  if !stream {
-    let task = turn_group.spawn(allow_failure=true) <| () => {
-      @agent.supervise_turn(
-        database,
-        ids.turn_id,
-        cancellation,
-        deadline_at,
-        _ => (),
-        () => {
-          if content.canonical {
-            @agent.run_turn_message_controlled(
-              database,
-              selected,
-              connector,
-              @agent.OpenAI(connector, api_key),
-              Some(chat_id),
-              content.message,
-              content.preview,
-              project,
-              ids,
-              @env.now().reinterpret_as_int64(),
-              execution,
-              (process, input) => registry.run(database, process, input),
-              _ => (),
-            )
-          } else {
-            @agent.run_turn_controlled(
-              database,
-              selected,
-              connector,
-              @agent.OpenAI(connector, api_key),
-              Some(chat_id),
-              content.preview,
-              ids,
-              @env.now().reinterpret_as_int64(),
-              execution,
-              (process, input) => registry.run(database, process, input),
-              _ => (),
-            )
-          }
-        },
-      )
-    }
+  let event_sink = fn(event : @llm.CompletionEvent) -> Unit {
     match
-      supervisor.register(ids.turn_id, cancellation, deadline_at, () => {
-        task.cancel()
-      }) {
-      Err(error) => {
-        task.cancel()
-        send_platform_error(connection, error, id)
-        return
-      }
-      Ok(_) => ()
+      @moonhttp.public_event(
+        event,
+        0,
+        chat_id,
+        ids.turn_id,
+        ids.assistant_message_id,
+      ) {
+      Some((name, data)) if !terminal_event(name) =>
+        match
+          @conversation.append_event(
+            database,
+            ids.turn_id,
+            name,
+            data,
+            @env.now().reinterpret_as_int64(),
+          ) {
+          Ok(_) => ()
+          Err(error) => abort(error.message)
+        }
+      _ => ()
     }
-    defer supervisor.remove(ids.turn_id)
-    let result = task.wait() catch { _ => Err(@errors.turn_interrupted()) }
-    match result {
-      Err(error) => send_platform_error(connection, error, id)
-      Ok(value) => {
-        let current_chat = match @conversation.get_chat(database, chat_id) {
-          Ok(item) => item
-          Err(error) => {
-            send_platform_error(connection, error, id)
-            return
-          }
+  }
+  let task = turn_group.spawn(allow_failure=true) <| () => {
+    @agent.supervise_turn(
+      database,
+      ids.turn_id,
+      cancellation,
+      deadline_at,
+      event_sink,
+      () => {
+        if content.canonical {
+          @agent.run_turn_message_controlled(
+            database,
+            selected,
+            connector,
+            @agent.OpenAI(connector, api_key),
+            Some(chat_id),
+            content.message,
+            content.preview,
+            project,
+            ids,
+            @env.now().reinterpret_as_int64(),
+            execution,
+            (process, input) => registry.run(database, process, input),
+            event_sink,
+          )
+        } else {
+          @agent.run_turn_controlled(
+            database,
+            selected,
+            connector,
+            @agent.OpenAI(connector, api_key),
+            Some(chat_id),
+            content.preview,
+            ids,
+            @env.now().reinterpret_as_int64(),
+            execution,
+            (process, input) => registry.run(database, process, input),
+            event_sink,
+          )
         }
-        let turn = match @conversation.get_turn(database, value.turn_id) {
-          Ok(item) => item
-          Err(error) => {
-            send_platform_error(connection, error, id)
-            return
-          }
-        }
-        let body = @moonhttp.success({
-          "chat": @moonhttp.chat_json(current_chat, ""),
-          "turn": @moonhttp.turn_json(turn),
-          "message": {
-            "id": ids.assistant_message_id,
-            "chat_id": chat_id,
-            "turn_id": value.turn_id,
-            "role": "assistant",
-            "kind": "text",
-            "content": value.content,
-            "status": "completed",
-          },
-          "usage": {
-            "prompt_tokens": value.usage.prompt_tokens,
-            "completion_tokens": value.usage.completion_tokens,
-          },
-          "next": match value.next {
-            Some(data) => data
-            None => Json::null()
-          },
-        }).stringify()
-        send_platform_response(
-          connection,
-          {
-            status: 200,
-            content_type: "application/json; charset=utf-8",
-            body,
-            location: "",
-          },
-          id,
-        )
+      },
+    )
+  }
+  match
+    supervisor.register(ids.turn_id, cancellation, deadline_at, () => {
+      task.cancel()
+    }) {
+    Err(error) => {
+      task.cancel()
+      ignore(
+        @conversation.fail_turn(
+          database,
+          ids.turn_id,
+          error.code.as_string(),
+          error.message,
+          @env.now().reinterpret_as_int64(),
+        ),
+      )
+      if stream {
+        stream_turn_events(database, ids.turn_id, 0, connection, id)
+      } else {
+        send_platform_error(connection, error, id)
       }
+      return
+    }
+    Ok(_) => ()
+  }
+  defer supervisor.remove(ids.turn_id)
+  if stream {
+    @async.with_task_group() <| group => {
+      group.spawn_bg(allow_failure=true) <| () => {
+        stream_turn_events(database, ids.turn_id, 0, connection, id)
+      }
+      ignore(task.wait() catch { _ => Err(@errors.turn_interrupted()) })
     }
     return
   }
-  let headers = platform_headers("text/event-stream; charset=utf-8", id)
-  headers.set("Connection", "keep-alive")
-  headers.set("X-Accel-Buffering", "no")
-  connection.send_response(200, "OK", extra_headers=headers)
-  connection.flush()
-  let frames : Array[String] = []
-  let mut sequence = 1
-  frames.push(
-    @moonhttp.sse_frame(sequence, "turn.started", {
-      "sequence": sequence,
-      "chat_id": chat_id,
-      "turn_id": ids.turn_id,
-    }),
-  )
-  let mut terminal = false
-  let mut done = false
-  let mut open = true
-  @async.with_task_group() <| group => {
-    let event_sink = fn(event : @llm.CompletionEvent) -> Unit {
-      match
-        @moonhttp.public_event(
-          event,
-          sequence + 1,
-          chat_id,
-          ids.turn_id,
-          ids.assistant_message_id,
-        ) {
-        Some((name, data)) => {
-          sequence = sequence + 1
-          if [
-              "turn.failed", "turn.cancelled", "turn.timed_out", "turn.interrupted",
-            ].contains(name) {
-            terminal = true
-          }
-          frames.push(@moonhttp.sse_frame(sequence, name, data))
+  let result = task.wait() catch { _ => Err(@errors.turn_interrupted()) }
+  match result {
+    Err(error) => send_platform_error(connection, error, id)
+    Ok(value) => {
+      let current_chat = match @conversation.get_chat(database, chat_id) {
+        Ok(item) => item
+        Err(error) => {
+          send_platform_error(connection, error, id)
+          return
         }
-        None => ()
       }
-    }
-    let task = turn_group.spawn(allow_failure=true) <| () => {
-      @agent.supervise_turn(
-        database,
-        ids.turn_id,
-        cancellation,
-        deadline_at,
-        event_sink,
-        () => {
-          if content.canonical {
-            @agent.run_turn_message_controlled(
-              database,
-              selected,
-              connector,
-              @agent.OpenAI(connector, api_key),
-              Some(chat_id),
-              content.message,
-              content.preview,
-              project,
-              ids,
-              @env.now().reinterpret_as_int64(),
-              execution,
-              (process, input) => registry.run(database, process, input),
-              event_sink,
-            )
-          } else {
-            @agent.run_turn_controlled(
-              database,
-              selected,
-              connector,
-              @agent.OpenAI(connector, api_key),
-              Some(chat_id),
-              content.preview,
-              ids,
-              @env.now().reinterpret_as_int64(),
-              execution,
-              (process, input) => registry.run(database, process, input),
-              event_sink,
-            )
-          }
+      let turn = match @conversation.get_turn(database, value.turn_id) {
+        Ok(item) => item
+        Err(error) => {
+          send_platform_error(connection, error, id)
+          return
+        }
+      }
+      let body = @moonhttp.success({
+        "chat": @moonhttp.chat_json(current_chat, ""),
+        "turn": @moonhttp.turn_json(turn),
+        "message": {
+          "id": ids.assistant_message_id,
+          "chat_id": chat_id,
+          "turn_id": value.turn_id,
+          "role": "assistant",
+          "kind": "text",
+          "content": value.content,
+          "status": "completed",
         },
-      )
-    }
-    match
-      supervisor.register(ids.turn_id, cancellation, deadline_at, () => {
-        task.cancel()
-      }) {
-      Err(error) => {
-        task.cancel()
-        sequence = sequence + 1
-        frames.push(
-          @moonhttp.sse_frame(sequence, "turn.failed", {
-            "sequence": sequence,
-            "chat_id": chat_id,
-            "turn_id": ids.turn_id,
-            "error": {
-              "code": error.code.as_string(),
-              "message": error.message,
-            },
-          }),
-        )
-        terminal = true
-        done = true
-        return
-      }
-      Ok(_) => ()
-    }
-    defer supervisor.remove(ids.turn_id)
-    let mut ready = false
-    let mut ready_waits = 0
-    while !ready && ready_waits < 100 {
-      match @conversation.get_turn(database, ids.turn_id) {
-        Ok(_) => ready = true
-        Err(error) if error.code == @errors.RecordNotFound => {
-          ready_waits = ready_waits + 1
-          @async.sleep(1)
-        }
-        Err(_) => ready_waits = 100
-      }
-    }
-    group.spawn_bg(allow_failure=true) <| () => {
-      let mut index = 0
-      let mut last_write = @env.now()
-      while open && (!done || index < frames.length()) {
-        if index < frames.length() {
-          try {
-            while index < frames.length() {
-              connection.write_string(frames[index])
-              index = index + 1
-            }
-            connection.flush()
-            last_write = @env.now()
-          } catch {
-            _ => open = false
-          }
+        "usage": {
+          "prompt_tokens": value.usage.prompt_tokens,
+          "completion_tokens": value.usage.completion_tokens,
+        },
+        "next": match value.next {
+          Some(data) => data
+          None => Json::null()
+        },
+        "side_effect_warning": if turn.retry_of_turn_id.length() > 0 {
+          Json::string("Retry may repeat Process side effects")
         } else {
-          @async.sleep(25)
-          if @env.now() - last_write >= 15000 {
-            try {
-              connection.write_string(@moonhttp.heartbeat())
-              connection.flush()
-              last_write = @env.now()
-            } catch {
-              _ => open = false
-            }
-          }
-        }
-      }
-    }
-    let result = task.wait() catch { _ => Err(@errors.turn_interrupted()) }
-    match result {
-      Ok(value) => {
-        sequence = sequence + 1
-        frames.push(
-          @moonhttp.sse_frame(sequence, "message.completed", {
-            "sequence": sequence,
-            "chat_id": chat_id,
-            "turn_id": value.turn_id,
-            "message": {
-              "id": ids.assistant_message_id,
-              "role": "assistant",
-              "kind": "text",
-              "content": value.content,
-              "status": "completed",
-            },
-          }),
-        )
-        sequence = sequence + 1
-        let turn = match @conversation.get_turn(database, value.turn_id) {
-          Ok(item) => @moonhttp.turn_json(item)
-          Err(_) =>
-            { "id": value.turn_id, "chat_id": chat_id, "status": "completed" }
-        }
-        frames.push(
-          @moonhttp.sse_frame(sequence, "turn.completed", {
-            "sequence": sequence,
-            "chat_id": chat_id,
-            "turn_id": value.turn_id,
-            "turn": turn,
-            "usage": {
-              "prompt_tokens": value.usage.prompt_tokens,
-              "completion_tokens": value.usage.completion_tokens,
-            },
-            "next": match value.next {
-              Some(data) => data
-              None => Json::null()
-            },
-          }),
-        )
-      }
-      Err(error) if !terminal => {
-        sequence = sequence + 1
-        frames.push(
-          @moonhttp.sse_frame(sequence, "turn.failed", {
-            "sequence": sequence,
-            "chat_id": chat_id,
-            "turn_id": ids.turn_id,
-            "error": {
-              "code": error.code.as_string(),
-              "message": error.message,
-            },
-          }),
-        )
-      }
-      Err(_) => ()
-    }
-    done = true
-  }
-  if open {
-    connection.end_response() catch {
-      _ => ()
+          Json::null()
+        },
+      }).stringify()
+      send_platform_response(
+        connection,
+        {
+          status: 200,
+          content_type: "application/json; charset=utf-8",
+          body,
+          location: "",
+        },
+        id,
+      )
     }
   }
 }
@@ -1144,10 +1171,136 @@ async fn serve_command(app_dir : String) -> Unit {
             Some(value) => value.contains("text/event-stream")
             None => false
           }
+          let idempotency_key = match request.headers.get("idempotency-key") {
+            Some(value) =>
+              match @moonhttp.validate_idempotency_key(value) {
+                Err(error) => {
+                  ignore(@sqlite.close_result(database))
+                  send_platform_error(connection, error, id)
+                  return
+                }
+                Ok(_) => value
+              }
+            None => ""
+          }
           run_http_turn(
-            application, database, chat_id, content, attachments_root, stream, connection,
-            id, supervisor, turn_group,
+            application, database, chat_id, content, attachments_root, stream, idempotency_key,
+            "", connection, id, supervisor, turn_group,
           )
+          ignore(@sqlite.close_result(database))
+        }
+        Ok(Some(@moonhttp.RetryTurn(source_turn_id))) => {
+          let source_turn = match
+            @conversation.get_turn(database, source_turn_id) {
+            Ok(value) => value
+            Err(error) => {
+              ignore(@sqlite.close_result(database))
+              send_platform_error(connection, error, id)
+              return
+            }
+          }
+          let source_message = match
+            @conversation.user_message_for_turn(database, source_turn_id) {
+            Ok(value) => value
+            Err(error) => {
+              ignore(@sqlite.close_result(database))
+              send_platform_error(connection, error, id)
+              return
+            }
+          }
+          let stream = match request.headers.get("accept") {
+            Some(value) => value.contains("text/event-stream")
+            None => false
+          }
+          let idempotency_key = match request.headers.get("idempotency-key") {
+            Some(value) =>
+              match @moonhttp.validate_idempotency_key(value) {
+                Err(error) => {
+                  ignore(@sqlite.close_result(database))
+                  send_platform_error(connection, error, id)
+                  return
+                }
+                Ok(_) => value
+              }
+            None => ""
+          }
+          run_http_turn(
+            application,
+            database,
+            source_turn.chat_id,
+            @moonhttp.retry_turn_input(source_message.message),
+            attachments_root,
+            stream,
+            idempotency_key,
+            source_turn_id,
+            connection,
+            id,
+            supervisor,
+            turn_group,
+          )
+          ignore(@sqlite.close_result(database))
+        }
+        Ok(Some(@moonhttp.ReplayEvents(turn_id, query_after))) => {
+          let mut after = query_after
+          match request.headers.get("last-event-id") {
+            Some(source) =>
+              match
+                @moonhttp.turn_event_cursor(
+                  source, turn_id, "headers.last-event-id",
+                ) {
+                Err(error) => {
+                  ignore(@sqlite.close_result(database))
+                  send_platform_error(connection, error, id)
+                  return
+                }
+                Ok(value) => {
+                  if query_after > 0 && query_after != value {
+                    ignore(@sqlite.close_result(database))
+                    send_platform_error(
+                      connection,
+                      @errors.invalid_argument(
+                        "after and Last-Event-ID must match", "query.after",
+                      ),
+                      id,
+                    )
+                    return
+                  }
+                  after = value
+                }
+              }
+            None => ()
+          }
+          let stream = match request.headers.get("accept") {
+            Some(value) => value.contains("text/event-stream")
+            None => false
+          }
+          if stream {
+            stream_turn_events(database, turn_id, after, connection, id)
+          } else {
+            let events = match
+              @conversation.list_events(database, turn_id, after, 1000) {
+              Ok(value) => value
+              Err(error) => {
+                ignore(@sqlite.close_result(database))
+                send_platform_error(connection, error, id)
+                return
+              }
+            }
+            let values : Array[Json] = []
+            for event in events {
+              values.push(@moonhttp.turn_event_json(event))
+            }
+            send_platform_response(
+              connection,
+              {
+                status: 200,
+                content_type: "application/json; charset=utf-8",
+                body: @moonhttp.success(Json::array(values)).stringify(),
+                location: "",
+              },
+              id,
+            )
+          }
           ignore(@sqlite.close_result(database))
         }
         Ok(Some(@moonhttp.CancelTurn(turn_id))) => {

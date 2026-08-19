@@ -294,6 +294,24 @@ test "v4 migration preserves turns and foreign keys while adding control state" 
   assert_eq(turn.status, "completed")
   assert_eq(turn.cancel_requested_at, 0)
   assert_eq(turn.deadline_at, 0)
+  assert_eq(turn.retry_of_turn_id, "")
+  assert_eq(turn.attempt, 1)
+  assert_eq(turn.idempotency_key, "")
+  assert_eq(turn.request_hash, "")
+  let version = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_migrations WHERE version = 6",
+  )
+  ignore(version.step())
+  let version_count : Int = version.column(index=0)
+  version.finalize()
+  assert_eq(version_count, 1)
+  let events = connection.prepare(
+    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_moonyao_turn_events'",
+  )
+  ignore(events.step())
+  let event_table_count : Int = events.column(index=0)
+  events.finalize()
+  assert_eq(event_table_count, 1)
   let foreign_keys = connection.prepare("PRAGMA foreign_key_check")
   assert_false(foreign_keys.step())
   foreign_keys.finalize()
@@ -330,6 +348,220 @@ test "turn cancellation request is idempotent and terminal control uses CAS" {
   match request_turn_cancel(connection, "missing", 50) {
     Err(error) => assert_eq(error.code, @errors.RecordNotFound)
     Ok(_) => fail("expected missing turn rejection")
+  }
+  connection.close()
+}
+
+///|
+test "turn event journal orders replay and records one terminal event" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(migrate(connection))
+  ignore(create_chat(connection, "chat", "todo", "events", 1))
+  ignore(begin_turn(connection, "turn", "user", "chat", "hello", 2))
+  match
+    append_event(connection, "turn", "hook.started", { "kind": "create" }, 3) {
+    Ok(event) => assert_eq(event.sequence, 2)
+    Err(error) => fail(error.message)
+  }
+  match
+    append_event(connection, "turn", "message.delta", { "delta": "hi" }, 4) {
+    Ok(event) => assert_eq(event.sequence, 3)
+    Err(error) => fail(error.message)
+  }
+  ignore(
+    complete_turn(
+      connection,
+      "assistant",
+      "chat",
+      "turn",
+      "hi",
+      { prompt_tokens: 2, completion_tokens: 1 },
+      5,
+    ),
+  )
+  match list_events(connection, "turn", 2, 100) {
+    Ok(events) => {
+      assert_eq(events.length(), 3)
+      assert_eq(events[0].sequence, 3)
+      assert_eq(events[0].event, "message.delta")
+      assert_eq(events[1].event, "message.completed")
+      assert_eq(events[2].event, "turn.completed")
+      assert_true(
+        events[2].data.stringify().contains("\"status\":\"completed\""),
+      )
+    }
+    Err(error) => fail(error.message)
+  }
+  match
+    append_event(connection, "turn", "message.delta", { "delta": "late" }, 6) {
+    Err(error) => assert_eq(error.code, @errors.TurnConflict)
+    Ok(_) => fail("expected terminal event append rejection")
+  }
+  let terminal = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_turn_events WHERE turn_id = 'turn' AND event LIKE 'turn.%' AND event != 'turn.started'",
+  )
+  ignore(terminal.step())
+  let count : Int = terminal.column(index=0)
+  terminal.finalize()
+  assert_eq(count, 1)
+  connection.close()
+}
+
+///|
+test "startup recovery appends an interrupted terminal event" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(migrate(connection))
+  ignore(create_chat(connection, "chat", "todo", "recover", 1))
+  ignore(begin_turn(connection, "turn", "user", "chat", "hello", 2))
+  assert_eq(recover_active(connection, 3).unwrap(), 1)
+  let events = list_events(connection, "turn", 0, 100).unwrap()
+  assert_eq(events.length(), 2)
+  assert_eq(events[1].event, "turn.interrupted")
+  assert_eq(get_turn(connection, "turn").unwrap().status, "interrupted")
+  assert_eq(recover_active(connection, 4).unwrap(), 0)
+  assert_eq(list_events(connection, "turn", 0, 100).unwrap().length(), 2)
+  connection.close()
+}
+
+///|
+test "idempotency and retry preserve canonical input and root attempts" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(migrate(connection))
+  ignore(create_chat(connection, "chat", "todo", "retry", 1))
+  let attachment : @attachment.Attachment = {
+    id: "att_abcdefghijklmnopqrst",
+    storage_key: "ab/att_abcdefghijklmnopqrst",
+    filename: "note.txt",
+    media_type: "text/plain",
+    byte_size: 5,
+    sha256: "hash",
+    kind: @attachment.Text,
+    status: "ready",
+    created_at: 1,
+    deleted_at: 0,
+  }
+  ignore(@attachment.insert(connection, attachment))
+  let input : @content.Message = {
+    role: @content.User,
+    content: Some(
+      @content.Parts([
+        @content.TextPart("read"),
+        @content.FileRef(attachment.id, attachment.filename),
+      ]),
+    ),
+    name: None,
+    tool_call_id: None,
+    reasoning_content: None,
+    tool_calls: [],
+    refusal: None,
+  }
+  ignore(
+    begin_turn(
+      connection,
+      "root",
+      "user-root",
+      "chat",
+      "read [File: note.txt]",
+      2,
+      idempotency_key="initial-key",
+      request_hash="initial-hash",
+      canonical_message=Some(input),
+    ),
+  )
+  match get_turn_by_idempotency(connection, "chat", "initial-key") {
+    Ok(Some(turn)) => assert_eq(turn.id, "root")
+    _ => fail("expected idempotent turn lookup")
+  }
+  ignore(fail_turn(connection, "root", "llm_error", "failed", 3))
+  let original = user_message_for_turn(connection, "root").unwrap()
+  assert_eq(original.message, input)
+  ignore(
+    begin_turn(
+      connection,
+      "retry-2",
+      "user-retry-2",
+      "chat",
+      "read [File: note.txt]",
+      4,
+      idempotency_key="retry-key-2",
+      request_hash="retry-hash-2",
+      canonical_message=Some(original.message),
+      retry_source_turn_id="root",
+    ),
+  )
+  let retry2 = get_turn(connection, "retry-2").unwrap()
+  assert_eq(retry2.retry_of_turn_id, "root")
+  assert_eq(retry2.attempt, 2)
+  ignore(fail_turn(connection, "retry-2", "llm_error", "failed again", 5))
+  ignore(
+    begin_turn(
+      connection,
+      "retry-3",
+      "user-retry-3",
+      "chat",
+      "read [File: note.txt]",
+      6,
+      canonical_message=Some(original.message),
+      retry_source_turn_id="retry-2",
+    ),
+  )
+  let retry3 = get_turn(connection, "retry-3").unwrap()
+  assert_eq(retry3.retry_of_turn_id, "root")
+  assert_eq(retry3.attempt, 3)
+  assert_eq(
+    user_message_for_turn(connection, "retry-3").unwrap().message,
+    input,
+  )
+  let refs = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_message_attachments WHERE message_id IN ('user-root','user-retry-2','user-retry-3')",
+  )
+  ignore(refs.step())
+  let ref_count : Int = refs.column(index=0)
+  refs.finalize()
+  assert_eq(ref_count, 3)
+  match
+    begin_turn(
+      connection,
+      "retry-active",
+      "user-retry-active",
+      "chat",
+      "read",
+      7,
+      retry_source_turn_id="retry-3",
+    ) {
+    Err(error) => assert_eq(error.code, @errors.TurnConflict)
+    Ok(_) => fail("expected active retry rejection")
+  }
+  ignore(fail_turn(connection, "retry-3", "llm_error", "third failure", 8))
+  ignore(
+    begin_turn(connection, "completed", "user-completed", "chat", "done", 9),
+  )
+  ignore(
+    complete_turn(
+      connection,
+      "assistant-completed",
+      "chat",
+      "completed",
+      "done",
+      { prompt_tokens: 1, completion_tokens: 1 },
+      10,
+    ),
+  )
+  match
+    begin_turn(
+      connection,
+      "retry-completed",
+      "user-retry-completed",
+      "chat",
+      "done",
+      11,
+      retry_source_turn_id="completed",
+    ) {
+    Err(error) => {
+      assert_eq(error.code, @errors.TurnConflict)
+      assert_eq(error.path, "turn.retry")
+    }
+    Ok(_) => fail("expected completed retry rejection")
   }
   connection.close()
 }

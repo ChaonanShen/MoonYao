@@ -331,3 +331,61 @@ pub fn list_canonical(
     }
   }
 }
+
+///|
+pub fn user_message_for_turn(
+  connection : @sqlite3.Connection,
+  turn_id : String,
+) -> Result[CanonicalMessage, @errors.EngineError] {
+  let statement = connection.prepare(
+    "SELECT id, chat_id, turn_id, sequence, canonical_json, status, created_at FROM _moonyao_messages WHERE turn_id = ? AND role = 'user' AND canonical_json != '' ORDER BY sequence LIMIT 1",
+  ) catch {
+    _ =>
+      return Err(
+        @errors.database_error("could not prepare turn input query", "message"),
+      )
+  }
+  try {
+    statement.bind(index=1, turn_id)
+    if !statement.step() {
+      statement.finalize()
+      return Err(@errors.record_not_found("turn.message"))
+    }
+    let source : String = statement.column(index=4)
+    let parsed = @json.parse(source) catch {
+      _ => {
+        statement.finalize()
+        return Err(
+          @errors.database_error("canonical message is invalid", "message"),
+        )
+      }
+    }
+    let message = match @content.decode(parsed, "message") {
+      Ok(value) => value
+      Err(_) => {
+        statement.finalize()
+        return Err(
+          @errors.database_error("canonical message is invalid", "message"),
+        )
+      }
+    }
+    let result : CanonicalMessage = {
+      id: statement.column(index=0),
+      chat_id: statement.column(index=1),
+      turn_id: statement.column(index=2),
+      sequence: statement.column(index=3),
+      message,
+      status: statement.column(index=5),
+      created_at: statement.column(index=6),
+    }
+    statement.finalize()
+    Ok(result)
+  } catch {
+    _ => {
+      statement.finalize() catch {
+        _ => ()
+      }
+      Err(@errors.database_error("could not read turn input", "message"))
+    }
+  }
+}

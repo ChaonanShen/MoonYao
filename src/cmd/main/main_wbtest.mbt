@@ -145,8 +145,10 @@ async test "platform responses cross real TCP with security headers" {
 async test "HTTP turns stream public events and persist completion" {
   @async.with_task_group() <| group => {
     let provider = @asynchttp.Server(@socket.Addr::parse("127.0.0.1:0"))
+    let provider_requests = Ref(0)
     group.spawn_bg(no_wait=true) <| () => {
       provider.run_forever(allow_failure=true) <| ((_, body, connection) => {
+        provider_requests.val = provider_requests.val + 1
         ignore(body.read_all())
         connection.send_response(200, "OK", extra_headers={
           "Content-Type": "text/event-stream",
@@ -191,6 +193,11 @@ async test "HTTP turns stream public events and persist completion" {
     ignore(@conversation.create_chat(database, "json-chat", "todo", "JSON", 1))
     ignore(
       @conversation.create_chat(
+        database, "idempotent-chat", "todo", "Idempotent", 1,
+      ),
+    )
+    ignore(
+      @conversation.create_chat(
         database, "disconnect-chat", "todo", "Disconnect", 1,
       ),
     )
@@ -198,7 +205,16 @@ async test "HTTP turns stream public events and persist completion" {
     group.spawn_bg(no_wait=true) <| () => {
       platform.run_forever(allow_failure=true) <| ((request, body, connection) => {
         ignore(body.read_all())
-        let stream = request.path != "/json"
+        if request.path == "/resume" {
+          let turn = @conversation.get_turn_by_idempotency(
+              database, "idempotent-chat", "same-key",
+            )
+            .unwrap()
+            .unwrap()
+          stream_turn_events(database, turn.id, 1, connection, "resume-request")
+          return
+        }
+        let stream = request.path == "/stream" || request.path == "/disconnect"
         run_http_turn(
           application,
           database,
@@ -206,12 +222,28 @@ async test "HTTP turns stream public events and persist completion" {
             "stream-chat"
           } else if request.path == "/disconnect" {
             "disconnect-chat"
+          } else if request.path == "/idempotent" ||
+            request.path == "/idempotent-conflict" {
+            "idempotent-chat"
           } else {
             "json-chat"
           },
-          @moonhttp.turn_input({ "content": "hello" }).unwrap(),
+          @moonhttp.turn_input({
+            "content": if request.path == "/idempotent-conflict" {
+              "different"
+            } else {
+              "hello"
+            },
+          }).unwrap(),
           "/unused-attachments",
           stream,
+          if request.path == "/idempotent" ||
+            request.path == "/idempotent-conflict" {
+            "same-key"
+          } else {
+            ""
+          },
+          "",
           connection,
           "turn-request",
           @agent.TurnSupervisor::new(),
@@ -245,6 +277,32 @@ async test "HTTP turns stream public events and persist completion" {
     assert_eq(json_response.code, 200)
     assert_true(json_body.text().contains("\"content\":\"hello\""))
     assert_true(json_body.text().contains("\"next\":null"))
+    let before_idempotent = provider_requests.val
+    let (first_idempotent, _) = @asynchttp.post(base + "/idempotent", "{}", headers={
+      "Content-Type": "application/json",
+    })
+    assert_eq(first_idempotent.code, 200)
+    let (second_idempotent, second_body) = @asynchttp.post(
+      base + "/idempotent",
+      "{}",
+      headers={ "Content-Type": "application/json" },
+    )
+    assert_eq(second_idempotent.code, 200)
+    assert_true(second_body.text().contains("\"idempotent_replay\":true"))
+    assert_eq(provider_requests.val, before_idempotent + 1)
+    let (conflict, conflict_body) = @asynchttp.post(
+      base + "/idempotent-conflict",
+      "{}",
+      headers={ "Content-Type": "application/json" },
+    )
+    assert_eq(conflict.code, 409)
+    assert_true(conflict_body.text().contains("idempotency-key"))
+    let (resume_response, resume_body) = @asynchttp.get(base + "/resume")
+    let resumed = resume_body.text()
+    assert_eq(resume_response.code, 200)
+    assert_false(resumed.contains("id: 1\n"))
+    assert_true(resumed.contains("event: message.delta"))
+    assert_true(resumed.contains("event: turn.completed"))
     let disconnected = @socket.Tcp::connect(platform.addr)
     disconnected.write(
       "POST /disconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",

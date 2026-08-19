@@ -69,6 +69,12 @@ pub fn turn_json(turn : @conversation.Turn) -> Json {
     "id": turn.id,
     "chat_id": turn.chat_id,
     "status": turn.status,
+    "retry_of_turn_id": if turn.retry_of_turn_id.length() > 0 {
+      Json::string(turn.retry_of_turn_id)
+    } else {
+      Json::null()
+    },
+    "attempt": turn.attempt,
     "prompt_tokens": turn.prompt_tokens,
     "completion_tokens": turn.completion_tokens,
     "cancel_requested_at": Json::number(turn.cancel_requested_at.to_double()),
@@ -83,6 +89,17 @@ pub fn turn_json(turn : @conversation.Turn) -> Json {
     })
   }
   Json::object(result)
+}
+
+///|
+pub fn turn_event_json(event : @conversation.TurnEvent) -> Json {
+  {
+    "turn_id": event.turn_id,
+    "sequence": event.sequence,
+    "event": event.event,
+    "data": event.data,
+    "created_at": Json::number(event.created_at.to_double()),
+  }
 }
 
 ///|
@@ -261,6 +278,131 @@ pub(all) struct TurnInput {
   timeout_ms : Int
   metadata : Json
 } derive(Eq, Debug)
+
+///|
+pub fn retry_turn_input(message : @content.Message) -> TurnInput {
+  {
+    preview: message_preview(message),
+    message,
+    canonical: true,
+    timeout_ms: 300000,
+    metadata: Json::object(Map([])),
+  }
+}
+
+///|
+fn stable_json_source(value : Json) -> String {
+  match value {
+    Object(object) => {
+      let keys : Array[String] = []
+      for key in object.keys() {
+        keys.push(key)
+      }
+      keys.sort()
+      let output = StringBuilder::new()
+      output.write_char('{')
+      for index = 0; index < keys.length(); index = index + 1 {
+        if index > 0 {
+          output.write_char(',')
+        }
+        output.write_string(Json::string(keys[index]).stringify())
+        output.write_char(':')
+        output.write_string(
+          stable_json_source(object.get(keys[index]).unwrap()),
+        )
+      }
+      output.write_char('}')
+      output.to_string()
+    }
+    Array(items) => {
+      let output = StringBuilder::new()
+      output.write_char('[')
+      for index = 0; index < items.length(); index = index + 1 {
+        if index > 0 {
+          output.write_char(',')
+        }
+        output.write_string(stable_json_source(items[index]))
+      }
+      output.write_char(']')
+      output.to_string()
+    }
+    _ => value.stringify()
+  }
+}
+
+///|
+pub fn turn_request_hash(
+  input : TurnInput,
+  retry_source_turn_id : String,
+) -> String {
+  let canonical : Json = {
+    "message": @content.encode(input.message),
+    "metadata": input.metadata,
+    "retry_source_turn_id": retry_source_turn_id,
+    "timeout_ms": input.timeout_ms,
+  }
+  @crypto.bytes_to_hex_string(
+    @crypto.sha256(@encoding.encode(UTF8, stable_json_source(canonical))),
+  )
+}
+
+///|
+pub fn validate_idempotency_key(
+  key : String,
+) -> Result[Unit, @errors.EngineError] {
+  if key.length() < 1 || key.length() > 128 {
+    return Err(
+      @errors.invalid_argument(
+        "Idempotency-Key must contain 1 to 128 ASCII characters", "headers.idempotency-key",
+      ),
+    )
+  }
+  for character in key {
+    let code = character.to_int()
+    let valid = (code >= 48 && code <= 57) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      [45, 46, 58, 95].contains(code)
+    if !valid {
+      return Err(
+        @errors.invalid_argument(
+          "Idempotency-Key contains an unsupported character", "headers.idempotency-key",
+        ),
+      )
+    }
+  }
+  Ok(())
+}
+
+///|
+pub fn event_cursor(
+  source : String,
+  path : String,
+) -> Result[Int, @errors.EngineError] {
+  parse_non_negative(source, path)
+}
+
+///|
+pub fn turn_event_cursor(
+  source : String,
+  turn_id : String,
+  path : String,
+) -> Result[Int, @errors.EngineError] {
+  let parts : Array[String] = []
+  source.split(":").each(part => parts.push(part.to_owned()))
+  match parts {
+    [sequence] => event_cursor(sequence, path)
+    [cursor_turn_id, sequence] => {
+      if cursor_turn_id != turn_id {
+        return Err(
+          @errors.invalid_argument("event cursor belongs to another turn", path),
+        )
+      }
+      event_cursor(sequence, path)
+    }
+    _ => Err(@errors.invalid_argument("invalid event cursor", path))
+  }
+}
 
 ///|
 fn message_preview(message : @content.Message) -> String {
@@ -453,6 +595,8 @@ pub(all) struct PlatformResponse {
 pub(all) enum PlatformAction {
   Response(PlatformResponse)
   Turn(String, TurnInput)
+  RetryTurn(String)
+  ReplayEvents(String, Int)
   CancelTurn(String)
   UploadAttachment(String, String, Bytes, String)
 } derive(Debug)
@@ -808,13 +952,6 @@ pub fn dispatch_platform(
         Err(error) => return Err(error)
         Ok(_) => ()
       }
-      let active = match @conversation.active_turn_id(connection, chat_id) {
-        Ok(value) => value
-        Err(error) => return Err(error)
-      }
-      if active.length() > 0 {
-        return Err(@errors.turn_conflict())
-      }
       Ok(Some(Turn(chat_id, content)))
     }
     ["v1", "turns", turn_id] => {
@@ -848,6 +985,54 @@ pub fn dispatch_platform(
         Ok(_) => Ok(Some(CancelTurn(turn_id)))
       }
     }
+    ["v1", "turns", turn_id, "retry"] => {
+      if verb != "POST" {
+        return Err(@errors.method_not_allowed("POST"))
+      }
+      match pagination(query, []) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      match strict_object(body, [], "body") {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      let turn = match @conversation.get_turn(connection, turn_id) {
+        Err(error) => return Err(error)
+        Ok(value) => value
+      }
+      if !["failed", "cancelled", "timed_out", "interrupted"].contains(
+          turn.status,
+        ) {
+        return Err(@errors.turn_retry_conflict("turn status cannot be retried"))
+      }
+      Ok(Some(RetryTurn(turn_id)))
+    }
+    ["v1", "turns", turn_id, "events"] => {
+      if verb != "GET" {
+        return Err(@errors.method_not_allowed("GET"))
+      }
+      match @conversation.get_turn(connection, turn_id) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      for key in query.keys() {
+        if key != "after" {
+          return Err(
+            @errors.invalid_argument("unknown query parameter", "query." + key),
+          )
+        }
+      }
+      let after = match query.get("after") {
+        None => 0
+        Some(source) =>
+          match parse_non_negative(source, "query.after") {
+            Ok(value) => value
+            Err(error) => return Err(error)
+          }
+      }
+      Ok(Some(ReplayEvents(turn_id, after)))
+    }
     _ => Err(@errors.route_not_found(path))
   }
 }
@@ -855,6 +1040,24 @@ pub fn dispatch_platform(
 ///|
 pub fn sse_frame(id : Int, event : String, data : Json) -> String {
   "id: " +
+  id.to_string() +
+  "\nevent: " +
+  event +
+  "\ndata: " +
+  data.stringify() +
+  "\n\n"
+}
+
+///|
+pub fn turn_sse_frame(
+  turn_id : String,
+  id : Int,
+  event : String,
+  data : Json,
+) -> String {
+  "id: " +
+  turn_id +
+  ":" +
   id.to_string() +
   "\nevent: " +
   event +
@@ -895,7 +1098,14 @@ pub fn public_event(
       base.set("delta", Json::string(delta))
       Some(("message.delta", Json::object(base)))
     }
-    @llm.Usage(_) => None
+    @llm.Usage(usage) => {
+      base.set("prompt_tokens", Json::number(usage.prompt_tokens.to_double()))
+      base.set(
+        "completion_tokens",
+        Json::number(usage.completion_tokens.to_double()),
+      )
+      Some(("usage", Json::object(base)))
+    }
     @llm.ToolStarted(id, name) => {
       base.set("tool_call_id", Json::string(id))
       base.set("name", Json::string(name))

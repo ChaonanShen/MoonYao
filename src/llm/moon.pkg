@@ -2,6 +2,7 @@ import {
   "ChaonanShen/MoonYao/errors",
   "ChaonanShen/MoonYao/content",
   "moonbitlang/core/json",
+  "moonbitlang/core/string",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",
   "moonbitlang/async/io",

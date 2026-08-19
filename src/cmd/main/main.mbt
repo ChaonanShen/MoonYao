@@ -135,6 +135,14 @@ fn random_id() -> Result[String, @errors.EngineError] {
 fn completion_event_json(event : @llm.CompletionEvent) -> Json {
   match event {
     @llm.Started => { "event": "turn.started" }
+    @llm.ProviderRetrying(attempt, max_attempts, delay_ms, reason) =>
+      {
+        "event": "provider.retrying",
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "delay_ms": delay_ms,
+        "reason": reason,
+      }
     @llm.TextDelta(content) => { "event": "message.delta", "content": content }
     @llm.Usage(usage) =>
       {

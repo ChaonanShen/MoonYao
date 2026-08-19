@@ -46,6 +46,7 @@ pub(all) struct Usage {
 ///|
 pub(all) enum CompletionEvent {
   Started
+  ProviderRetrying(Int, Int, Int, String)
   TextDelta(String)
   Usage(Usage)
   Completed

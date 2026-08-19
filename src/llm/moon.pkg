@@ -1,11 +1,14 @@
 import {
   "ChaonanShen/MoonYao/errors",
+  "ChaonanShen/MoonYao/content",
   "moonbitlang/core/json",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",
   "moonbitlang/async/io",
   "moonbitlang/async/http",
   "moonbitlang/async",
+  "moonbitlang/x/codec/base64",
+  "moonbitlang/x/encoding",
 }
 
 import {

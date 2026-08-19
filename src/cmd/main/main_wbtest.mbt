@@ -62,6 +62,7 @@ fn tcp_test_agent() -> @agent.Agent {
     tools: [],
     tool_names: [],
     create_process: "",
+    next_process: "",
     before_process: "",
     after_process: "",
   }
@@ -227,12 +228,14 @@ async test "HTTP turns stream public events and persist completion" {
     assert_true(events.contains("event: message.delta"))
     assert_true(events.contains("event: message.completed"))
     assert_true(events.contains("event: turn.completed"))
+    assert_true(events.contains("\"next\":null"))
     assert_false(events.contains("tool.arguments.delta"))
     let (json_response, json_body) = @asynchttp.post(base + "/json", "{}", headers={
       "Content-Type": "application/json",
     })
     assert_eq(json_response.code, 200)
     assert_true(json_body.text().contains("\"content\":\"hello\""))
+    assert_true(json_body.text().contains("\"next\":null"))
     match @conversation.active_turn_id(database, "stream-chat") {
       Ok(value) => assert_eq(value, "")
       Err(error) => fail(error.message)

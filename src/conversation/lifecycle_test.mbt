@@ -23,6 +23,22 @@ test "migration v4 persists bounded Create lifecycle snapshots" {
     }
     Err(error) => fail(error.message)
   }
+  let next : Json = { "action": "data", "data": { "answer": "custom" } }
+  match save_next_snapshot(connection, "turn", context, next) {
+    Ok(_) => ()
+    Err(error) => fail(error.message)
+  }
+  match next_snapshot(connection, "turn") {
+    Ok((stored_context, stored_next)) => {
+      assert_eq(stored_context, context)
+      assert_eq(stored_next, next)
+    }
+    Err(error) => fail(error.message)
+  }
+  match create_snapshot(connection, "turn") {
+    Ok((_, stored_create)) => assert_eq(stored_create, decision)
+    Err(error) => fail(error.message)
+  }
   match
     save_create_snapshot(
       connection,

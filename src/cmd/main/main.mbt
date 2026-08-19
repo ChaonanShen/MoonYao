@@ -290,6 +290,10 @@ async fn agent_chat_command(
             "chat_id": turn.chat_id,
             "turn_id": turn.turn_id,
             "content": turn.content,
+            "next": match turn.next {
+              Some(value) => value
+              None => Json::null()
+            },
             "history_truncated": turn.history_truncated,
           }
           lines.push(final_event.stringify())
@@ -635,6 +639,10 @@ async fn run_http_turn(
             "prompt_tokens": value.usage.prompt_tokens,
             "completion_tokens": value.usage.completion_tokens,
           },
+          "next": match value.next {
+            Some(data) => data
+            None => Json::null()
+          },
         }).stringify()
         send_platform_response(
           connection,
@@ -777,6 +785,10 @@ async fn run_http_turn(
             "usage": {
               "prompt_tokens": value.usage.prompt_tokens,
               "completion_tokens": value.usage.completion_tokens,
+            },
+            "next": match value.next {
+              Some(data) => data
+              None => Json::null()
             },
           }),
         )

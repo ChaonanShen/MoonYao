@@ -13,6 +13,7 @@ async test "fake client runs three persisted turns and restart-compatible histor
     tools: [],
     tool_names: [],
     create_process: "",
+    next_process: "",
     before_process: "",
     after_process: "",
   }
@@ -119,6 +120,7 @@ async test "canonical turn persists multipart input and attachment references" {
         tools: [],
         tool_names: [],
         create_process: "",
+        next_process: "",
         before_process: "",
         after_process: "",
       },
@@ -218,6 +220,7 @@ async test "Create hook receives canonical input and persists its decision" {
     tools: [],
     tool_names: [],
     create_process: "flows.create",
+    next_process: "",
     before_process: "",
     after_process: "",
   }
@@ -345,6 +348,7 @@ async test "twenty sequential turns leave no active turn" {
     tools: [],
     tool_names: [],
     create_process: "",
+    next_process: "",
     before_process: "",
     after_process: "",
   }
@@ -424,6 +428,7 @@ async fn run_concurrent_chat_smoke(suffix : String) -> Unit {
         tools: [],
         tool_names: [],
         create_process: "",
+        next_process: "",
         before_process: "",
         after_process: "",
       },
@@ -585,6 +590,7 @@ async test "invalid current input has no database side effects" {
     tools: [],
     tool_names: [],
     create_process: "",
+    next_process: "",
     before_process: "",
     after_process: "",
   }
@@ -662,6 +668,7 @@ fn tool_test_agent() -> Agent {
     ],
     tool_names: ["create_todo"],
     create_process: "",
+    next_process: "",
     before_process: "",
     after_process: "",
   }
@@ -985,6 +992,7 @@ async test "optional Process hooks can rewrite input and finish output" {
     tools: [],
     tool_names: [],
     create_process: "",
+    next_process: "",
     before_process: "flows.before",
     after_process: "flows.after",
   }
@@ -1022,6 +1030,114 @@ async test "optional Process hooks can rewrite input and finish output" {
   }
   assert_true(saw_before)
   assert_true(saw_after)
+  connection.close()
+}
+
+///|
+async test "Next hook receives tool results and returns persisted custom data" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let agent : Agent = { ..tool_test_agent(), next_process: "flows.next" }
+  let mut saw_next = false
+  let events : Array[@llm.CompletionEvent] = []
+  match
+    run_turn(
+      connection,
+      agent,
+      tool_test_connector(),
+      Client::FakeSequence([
+        fake_tool_response("{\"data\":{\"title\":\"from next\"}}"),
+        fake_text_response("standard answer"),
+      ]),
+      None,
+      "create one",
+      tool_test_ids("next"),
+      1,
+      (process, input) => {
+        if process == "flows.next" {
+          let source = input.stringify()
+          saw_next = source.contains("\"version\":1") &&
+            source.contains("\"tool_call_id\":\"call-1\"") &&
+            source.contains("\"title\":\"from next\"") &&
+            source.contains("\"result\":{\"id\":1}")
+          Ok(
+            (
+              {
+                "action": "data",
+                "data": {
+                  "answer": "custom answer",
+                  "ui": { "kind": "notice" },
+                },
+                "metadata": { "next": true },
+              } : Json),
+          )
+        } else {
+          Ok(({ "id": 1 } : Json))
+        }
+      },
+      event => events.push(event),
+    ) {
+    Ok(result) => {
+      assert_eq(result.content, "standard answer")
+      assert_eq(
+        result.next,
+        Some(({ "answer": "custom answer", "ui": { "kind": "notice" } } : Json)),
+      )
+    }
+    Err(error) => fail(error.message)
+  }
+  assert_true(saw_next)
+  assert_true(events.contains(@llm.HookStarted("next")))
+  assert_true(events.contains(@llm.HookCompleted("next")))
+  match @conversation.next_snapshot(connection, "turnnext") {
+    Ok((context, decision)) => {
+      assert_true(context.stringify().contains("\"next\":true"))
+      assert_true(decision.stringify().contains("custom answer"))
+    }
+    Err(error) => fail(error.message)
+  }
+  connection.close()
+}
+
+///|
+async test "Next Process failure does not persist a completed assistant message" {
+  ignore(@async.now())
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  let agent : Agent = {
+    ..tool_test_agent(),
+    tools: [],
+    tool_names: [],
+    next_process: "flows.next",
+  }
+  match
+    run_turn(
+      connection,
+      agent,
+      tool_test_connector(),
+      Client::Fake(fake_text_response("generated but rejected")),
+      None,
+      "hello",
+      tool_test_ids("next-failure"),
+      1,
+      (_, _) => Err(@errors.tool_error("Next failed")),
+      _ => (),
+    ) {
+    Err(error) => assert_eq(error.code, @errors.ToolError)
+    Ok(_) => fail("expected Next failure")
+  }
+  match @conversation.active_turn_id(connection, "chatnext-failure") {
+    Ok(value) => assert_eq(value, "")
+    Err(error) => fail(error.message)
+  }
+  match @conversation.list_messages(connection, "chatnext-failure", 10, 0) {
+    Ok(messages) => {
+      assert_eq(messages.length(), 1)
+      assert_eq(messages[0].role, "user")
+    }
+    Err(error) => fail(error.message)
+  }
   connection.close()
 }
 

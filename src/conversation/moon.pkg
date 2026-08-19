@@ -1,5 +1,7 @@
 import {
   "ChaonanShen/MoonYao/errors",
+  "ChaonanShen/MoonYao/content",
+  "ChaonanShen/MoonYao/attachment",
   "ChaonanShen/MoonYao/llm",
   "moonbit-community/sqlite3",
   "moonbitlang/core/json",

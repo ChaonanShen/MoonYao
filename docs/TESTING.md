@@ -28,32 +28,42 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/
 
 Agent 是主要验收路径，测试不需要真实 provider 或 API key。测试套件使用内存 SQLite 和
 loopback fake LLM server，覆盖严格 Connector/Agent/Prompt DSL、普通与分块 SSE 响应、
-Authorization 和请求 JSON、HTTP 500、timeout、三轮持久化、失败 turn 排除、active-turn
-冲突、启动恢复及硬删除。Process tools 测试覆盖 schema meta-validation、运行时参数校验、
-流式 tool arguments 聚合、allowlist、tool transcript、8-round/32-call 边界、Process 错误和
-before/after hooks。Agent 平台测试覆盖严格 request/query、metadata 脱敏、chat/message
-分页、internal transcript 隔离、active-turn 冲突、SSE escaping/公开事件过滤，以及真实
-TCP 上的 JSON turn、SSE terminal event、CUI 静态资源和 CSP/security headers。
+Authorization 和请求 JSON、HTTP 500、timeout、三轮持久化、active-turn 冲突、启动恢复及
+硬删除。canonical message 测试覆盖 text/image/file parts、attachment metadata 与完整性、
+provider-boundary 投影、引用持久化和旧 text schema 升级。Process tools 测试覆盖 schema
+meta-validation、运行时参数校验、流式 tool arguments 聚合、allowlist、tool transcript、
+8-round/32-call 边界、Process 错误和 Create/Next/before/after lifecycle hooks。
+
+控制面测试覆盖 cancel/deadline race、provider read 与 retry backoff cancellation、同步 Process
+取消、唯一 terminal event、幂等 request hash、retry root/attempt、canonical retry copy、事件
+journal cursor 和启动后 `interrupted` 恢复。Agent 平台测试覆盖严格 request/query/metadata/
+attachment limits、脱敏、chat/message 分页、internal transcript 隔离、SSE escaping/公开事件
+过滤，以及真实 TCP 上的 JSON turn、POST SSE、journal resume、幂等 replay、长流断开后后台
+完成、CUI 静态资源和 CSP/security headers。
 
 fake provider 监听动态 `127.0.0.1:0` 端口，由测试 task group 管理生命周期。覆盖普通文本、
 分块文本、三轮 history、tool create、非法参数修复、allowlist、HTTP 429/500、timeout、非法
 JSON、缺少 `[DONE]` 的中途断开，以及 tool arguments 分片聚合。matcher 验证 model、messages、
 tools、stream 和 Authorization 是否存在，但断言及错误输出不包含 bearer 值。可靠性 smoke
-连续完成 20 个 turn，并并发运行两个独立 chat runtime。
+连续完成 20 个 turn，并发运行两个独立 chat runtime，并验证 completion/cancellation race 只
+提交一个终态。
 
 Todo CRUD 是 Agent 工具基础设施的回归路径。HTTP 变更还需启动 `serve ./example/todo`，以
 真实 TCP 请求覆盖 Create/List/Find/Update/Delete、非法 JSON、错误 Content-Type、未知路由
 和 405 `Allow` 响应。
 
-修改 CUI 时还需在浏览器检查桌面与移动视口，完成 Agent/chat 基本流程，并使用类似
-`<img src=x onerror=alert(1)>` 的纯文本 fixture 确认不会生成可执行 DOM。真实 provider 的
-手工流式测试需要设置 API key；自动化测试使用 loopback fake provider，不需要外部网络。
+修改 CUI 时还需在浏览器检查桌面与移动视口，验证发送、attachment、取消、retry、断线续传、
+刷新 active chat 和各终态的 control enablement，并使用类似
+`<img src=x onerror=alert(1)>` 的纯文本 fixture 确认不会生成可执行 DOM。续传检查必须确认
+sequence 不重复且 terminal 后历史只出现一次。真实 provider 的手工流式测试需要设置 API
+key；自动化测试使用 loopback fake provider，不需要外部网络。
 
 人工验证真实 provider 时，先运行 `migrate`，再设置 DSL 所指向的环境变量并执行
 `agent chat`；不得把 key 写进 fixture、命令日志或仓库文件。
 
-0.1.0 发布验收日为 2026-08-18。自动离线验收已执行；当前环境没有提供真实 connector
-凭据，因此真实 provider 三轮、工具循环和无效 key 人工检查未执行，不能将其解读为通过。
+0.1.0 发布验收日为 2026-08-19。自动离线验收覆盖 110 个测试；当前环境没有提供真实
+connector 凭据，因此真实 provider 三轮、工具循环和无效 key 人工检查未执行，不能将其
+解读为通过。
 
 提交 MoonBit、配置、文档或 CI 变更前，至少应完成前四项；修改可执行程序或示例时，还应
 执行对应的运行验证。测试覆盖 Agent fake-client 主链路、CLI `check` 无文件副作用、

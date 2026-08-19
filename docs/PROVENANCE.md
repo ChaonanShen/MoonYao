@@ -10,6 +10,7 @@
 | `moonbitlang/x@0.4.50` | [moonbitlang/x](https://github.com/moonbitlang/x)，版本 `0.4.50` | Apache-2.0 | 仅使用 Native `fs` 包读取应用 DSL 文件和目录；不复制其源码。 |
 | `moonbit-community/sqlite3@0.1.6` | [moonbit-community/sqlite3.mbt](https://github.com/moonbit-community/sqlite3.mbt)，版本 `0.1.6` | Apache-2.0 | Native SQLite 绑定；用于 P2 的参数绑定、内存数据库和 schema/CRUD 实现。 |
 | `moonbitlang/async@0.20.6` | [moonbitlang/async](https://github.com/moonbitlang/async)，版本 `0.20.6` | Apache-2.0 | Native async runtime、TCP、HTTP/1.1 server，以及 OpenAI-compatible HTTPS client、timeout 和增量 SSE 读取；不复制其源码。 |
+| MoonBit Core `encoding` / `crypto` | 随上述 `moonbitlang/core` 工具链版本提供 | Apache-2.0 | 严格 UTF-8/base64 处理、attachment SHA-256 完整性摘要，以及 canonical idempotency request hash；不引入额外运行时依赖。 |
 | `actions/checkout@v5` | [actions/checkout](https://github.com/actions/checkout) | MIT | 在 GitHub Actions 中检出仓库源码。 |
 | `hustcer/setup-moonbit@v1.22` | [hustcer/setup-moonbit](https://github.com/hustcer/setup-moonbit/tree/v1.22) | MIT | 在 GitHub Actions 中安装 MoonBit 工具链。 |
 | Ubuntu 24.04 容器基底 | [ubuntu:24.04](https://hub.docker.com/_/ubuntu) | Ubuntu 许可证 | 为 Intel Mac 提供本地 Linux x86_64 MoonBit 开发与测试环境。 |
@@ -21,5 +22,8 @@
 - 不得复制 Yao 实现文件。需要兼容的公开行为，应先写成规格，再以 MoonBit 独立实现。
 - Yao Agent 的移植边界以公开文档、公开接口和可重复观察到的行为为准；未公开实现细节不作为
   兼容承诺，也不得通过源码翻译引入。
+- Multimodal canonical messages、Context/Create/Next lifecycle、cancel/deadline、retry、event
+  journal 和 CUI reconnect 均为 MoonBit 独立设计实现；只参考公开概念和可观察契约，没有复制
+  或翻译上游实现文件。
 - 不能仅依赖仓库页面显示的许可证标识；引入外部代码前须核验上游许可证全文及其适用
   范围。

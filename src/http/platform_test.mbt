@@ -130,7 +130,8 @@ test "platform dispatcher implements agent and chat APIs" {
     ) {
     Ok(Some(Turn(id, content))) => {
       assert_eq(id, "chat")
-      assert_eq(content, "hello")
+      assert_eq(content.preview, "hello")
+      assert_false(content.canonical)
     }
     _ => fail("expected turn action")
   }
@@ -188,7 +189,10 @@ test "platform inputs and pagination are strict" {
     Ok(_) => fail("expected unknown body field")
   }
   match turn_input({ "content": "hello" }) {
-    Ok(content) => assert_eq(content, "hello")
+    Ok(content) => {
+      assert_eq(content.preview, "hello")
+      assert_false(content.canonical)
+    }
     Err(error) => fail(error.message)
   }
   match rename_chat_input({ "title": "月".repeat(200) }) {
@@ -199,6 +203,116 @@ test "platform inputs and pagination are strict" {
     Err(error) => assert_eq(error.path, "body.content")
     Ok(_) => fail("expected UTF-8 byte limit")
   }
+}
+
+///|
+test "platform accepts canonical turns and attachment routes" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  match @conversation.migrate(connection) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  let canonical : Json = {
+    "message": {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Describe this" },
+        {
+          "type": "image",
+          "attachment_id": "att_abcdefghijklmnopqrst",
+          "detail": "auto",
+        },
+      ],
+    },
+  }
+  match turn_input(canonical) {
+    Ok(content) => {
+      assert_true(content.canonical)
+      assert_true(content.preview.contains("Describe this"))
+      assert_true(content.preview.contains("[Image]"))
+    }
+    Err(error) => fail(error.message)
+  }
+  match turn_input({ "content": "hello", "message": {} }) {
+    Err(error) => assert_eq(error.path, "body")
+    Ok(_) => fail("expected mutually exclusive turn input")
+  }
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "POST",
+      "/v1/attachments",
+      {
+        "filename": "note.txt",
+        "media_type": "text/plain",
+        "data_base64": "aGVsbG8=",
+      },
+      Map([]),
+      "upload",
+      7,
+    ) {
+    Ok(Some(UploadAttachment(filename, media_type, data, id))) => {
+      assert_eq(filename, "note.txt")
+      assert_eq(media_type, "text/plain")
+      assert_eq(data, b"hello")
+      assert_eq(id, "att_upload")
+    }
+    _ => fail("expected attachment upload action")
+  }
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "POST",
+      "/v1/attachments",
+      {
+        "filename": "note.txt",
+        "media_type": "text/plain",
+        "data_base64": "not base64",
+      },
+      Map([]),
+      "upload",
+      7,
+    ) {
+    Err(error) => assert_eq(error.path, "body.data_base64")
+    _ => fail("expected invalid base64 rejection")
+  }
+  let attachment : @attachment.Attachment = {
+    id: "att_abcdefghijklmnopqrst",
+    storage_key: "abcdefghijklmnopqrst",
+    filename: "note.txt",
+    media_type: "text/plain",
+    byte_size: 5,
+    sha256: "digest",
+    kind: @attachment.Text,
+    status: "ready",
+    created_at: 8,
+    deleted_at: 0,
+  }
+  match @attachment.insert(connection, attachment) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "GET",
+      "/v1/attachments/att_abcdefghijklmnopqrst",
+      {},
+      Map([]),
+      "unused",
+      9,
+    ) {
+    Ok(Some(Response(value))) => {
+      assert_eq(value.status, 200)
+      assert_true(value.body.contains("\"filename\":\"note.txt\""))
+      assert_false(value.body.contains("storage_key"))
+    }
+    _ => fail("expected attachment metadata response")
+  }
+  connection.close()
 }
 
 ///|
@@ -241,6 +355,10 @@ test "embedded CUI uses safe DOM rendering and no external build chain" {
   assert_true(agent_js.contains("event.key===\"Enter\"&&!event.shiftKey"))
   assert_true(agent_js.contains("!event.isComposing"))
   assert_true(agent_js.contains("requestSubmit()"))
+  assert_true(agent_html.contains("attachment-input"))
+  assert_true(agent_js.contains("/v1/attachments"))
+  assert_true(agent_js.contains("data_base64"))
+  assert_true(agent_js.contains("const message={role:\"user\",content:parts}"))
   assert_false(agent_html.contains("https://"))
   assert_false(agent_js.contains("https://"))
 }

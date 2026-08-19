@@ -422,6 +422,73 @@ pub async fn run_turn(
   invoke : (String, Json) -> Result[Json, @errors.EngineError],
   sink : (@llm.CompletionEvent) -> Unit,
 ) -> Result[TurnResult, @errors.EngineError] {
+  run_turn_inner(
+    connection,
+    agent,
+    connector,
+    client,
+    existing_chat_id,
+    input,
+    None,
+    ids,
+    now,
+    invoke,
+    sink,
+  )
+}
+
+///|
+/// Run one canonical user message with an ephemeral provider projection.
+pub async fn run_turn_message(
+  connection : @sqlite3.Connection,
+  agent : Agent,
+  connector : @llm.Connector,
+  client : Client,
+  existing_chat_id : String?,
+  input : @content.Message,
+  preview : String,
+  wire_message : Json,
+  ids : Ids,
+  now : Int64,
+  invoke : (String, Json) -> Result[Json, @errors.EngineError],
+  sink : (@llm.CompletionEvent) -> Unit,
+) -> Result[TurnResult, @errors.EngineError] {
+  if agent.before_process.length() > 0 {
+    return Err(
+      @errors.invalid_argument(
+        "multimodal turns require the canonical Create hook lifecycle", "message",
+      ),
+    )
+  }
+  run_turn_inner(
+    connection,
+    agent,
+    connector,
+    client,
+    existing_chat_id,
+    preview,
+    Some((input, wire_message)),
+    ids,
+    now,
+    invoke,
+    sink,
+  )
+}
+
+///|
+async fn run_turn_inner(
+  connection : @sqlite3.Connection,
+  agent : Agent,
+  connector : @llm.Connector,
+  client : Client,
+  existing_chat_id : String?,
+  input : String,
+  canonical_current : (@content.Message, Json)?,
+  ids : Ids,
+  now : Int64,
+  invoke : (String, Json) -> Result[Json, @errors.EngineError],
+  sink : (@llm.CompletionEvent) -> Unit,
+) -> Result[TurnResult, @errors.EngineError] {
   let started_at = @env.now().reinterpret_as_int64()
   match build_history(agent.prompts, [], input) {
     Ok(_) => ()
@@ -467,6 +534,22 @@ pub async fn run_turn(
     Ok(_) => ()
     Err(error) => return Err(error)
   }
+  match canonical_current {
+    Some((message, _)) =>
+      match
+        @conversation.replace_canonical_message(
+          connection,
+          ids.user_message_id,
+          message,
+        ) {
+        Ok(_) => ()
+        Err(error) =>
+          return Err(
+            fail_active_turn(connection, ids.turn_id, error, now, sink),
+          )
+      }
+    None => ()
+  }
   let stored = match @conversation.completed_messages(connection, chat_id) {
     Ok(value) => value
     Err(error) =>
@@ -478,6 +561,7 @@ pub async fn run_turn(
       return Err(fail_active_turn(connection, ids.turn_id, error, now, sink))
   }
   let messages = history.messages.copy()
+  let canonical_index = messages.length() - 1
   let mut metadata : Json = Json::object(Map([]))
   let all_events : Array[@llm.CompletionEvent] = []
   if agent.before_process.length() > 0 {
@@ -567,6 +651,14 @@ pub async fn run_turn(
     let request : @llm.ChatRequest = {
       model: connector.model,
       messages: messages.copy(),
+      wire_messages: match canonical_current {
+        Some((_, wire_current)) => {
+          let wire = @llm.chat_messages_json(messages)
+          wire[canonical_index] = wire_current
+          Some(wire)
+        }
+        None => None
+      },
       temperature: agent.options.temperature,
       max_tokens: agent.options.max_tokens,
       stream: true,

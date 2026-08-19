@@ -249,21 +249,143 @@ pub fn rename_chat_input(value : Json) -> Result[String, @errors.EngineError] {
 }
 
 ///|
-pub fn turn_input(value : Json) -> Result[String, @errors.EngineError] {
-  let object = match strict_object(value, ["content"], "body") {
+pub(all) struct TurnInput {
+  preview : String
+  message : @content.Message
+  canonical : Bool
+} derive(Eq, Debug)
+
+///|
+fn message_preview(message : @content.Message) -> String {
+  match message.content {
+    Some(@content.Text(value)) => value
+    Some(@content.Parts(parts)) => {
+      let output = StringBuilder::new()
+      for part in parts {
+        match part {
+          @content.TextPart(value) => output.write_string(value)
+          @content.ImageRef(_, _) => output.write_string(" [Image]")
+          @content.FileRef(_, filename) =>
+            output.write_string(" [File: " + filename + "]")
+        }
+      }
+      output.to_string().trim().to_owned()
+    }
+    None => ""
+  }
+}
+
+///|
+pub fn turn_input(value : Json) -> Result[TurnInput, @errors.EngineError] {
+  let object = match strict_object(value, ["content", "message"], "body") {
     Ok(v) => v
     Err(e) => return Err(e)
   }
-  match object.get("content") {
-    Some(String(value)) if value.length() >= 1 &&
-      has_at_most_utf8_bytes(value, 65536) => Ok(value)
-    _ =>
+  match (object.get("content"), object.get("message")) {
+    (Some(String(text)), None) if text.length() >= 1 &&
+      has_at_most_utf8_bytes(text, 65536) =>
+      Ok({
+        preview: text,
+        message: @content.text_message(@content.User, text),
+        canonical: false,
+      })
+    (None, Some(raw)) => {
+      let message = match @content.decode(raw, "body.message") {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      if message.role != @content.User {
+        return Err(
+          @errors.invalid_argument(
+            "message role must be user", "body.message.role",
+          ),
+        )
+      }
+      let preview = message_preview(message)
+      if preview.length() == 0 || !has_at_most_utf8_bytes(preview, 65536) {
+        return Err(
+          @errors.invalid_argument(
+            "message must contain text or an attachment", "body.message",
+          ),
+        )
+      }
+      Ok({ preview, message, canonical: true })
+    }
+    (Some(_), Some(_)) =>
+      Err(
+        @errors.invalid_argument("provide content or message, not both", "body"),
+      )
+    (Some(_), None) =>
       Err(
         @errors.invalid_argument(
           "content must contain 1 to 65536 bytes", "body.content",
         ),
       )
+    _ => Err(@errors.invalid_argument("content or message is required", "body"))
   }
+}
+
+///|
+pub fn attachment_json(value : @attachment.Attachment) -> Json {
+  {
+    "id": value.id,
+    "filename": value.filename,
+    "media_type": value.media_type,
+    "byte_size": value.byte_size,
+    "sha256": value.sha256,
+    "kind": match value.kind {
+      @attachment.Image => "image"
+      @attachment.Text => "text"
+    },
+    "status": value.status,
+    "created_at": Json::number(value.created_at.to_double()),
+  }
+}
+
+///|
+fn attachment_upload_input(
+  value : Json,
+) -> Result[(String, String, Bytes), @errors.EngineError] {
+  let object = match
+    strict_object(value, ["filename", "media_type", "data_base64"], "body") {
+    Ok(v) => v
+    Err(e) => return Err(e)
+  }
+  let filename = match object.get("filename") {
+    Some(String(v)) if v.length() > 0 => @attachment.safe_filename(v)
+    _ =>
+      return Err(
+        @errors.invalid_argument("filename is required", "body.filename"),
+      )
+  }
+  let media_type = match object.get("media_type") {
+    Some(String(v)) if v.length() > 0 => v
+    _ =>
+      return Err(
+        @errors.invalid_argument("media_type is required", "body.media_type"),
+      )
+  }
+  let encoded = match object.get("data_base64") {
+    Some(String(v)) if v.length() > 0 => v
+    _ =>
+      return Err(
+        @errors.invalid_argument("data_base64 is required", "body.data_base64"),
+      )
+  }
+  if encoded.length() > 14000000 {
+    return Err(
+      @errors.invalid_argument(
+        "attachment body is too large", "body.data_base64",
+      ),
+    )
+  }
+  let data = @base64.decode(encoded) catch {
+    _ =>
+      return Err(
+        @errors.invalid_argument("data_base64 is invalid", "body.data_base64"),
+      )
+  }
+  Ok((filename, media_type, data))
 }
 
 ///|
@@ -277,7 +399,8 @@ pub(all) struct PlatformResponse {
 ///|
 pub(all) enum PlatformAction {
   Response(PlatformResponse)
-  Turn(String, String)
+  Turn(String, TurnInput)
+  UploadAttachment(String, String, Bytes, String)
 } derive(Debug)
 
 ///|
@@ -386,6 +509,34 @@ pub fn dispatch_platform(
     Err(error) => return Err(error)
   }
   match segments {
+    ["v1", "attachments"] => {
+      if verb != "POST" {
+        return Err(@errors.method_not_allowed("POST"))
+      }
+      match pagination(query, []) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      let (filename, media_type, data) = match attachment_upload_input(body) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      Ok(Some(UploadAttachment(filename, media_type, data, "att_" + new_id)))
+    }
+    ["v1", "attachments", attachment_id] => {
+      if verb != "GET" {
+        return Err(@errors.method_not_allowed("GET"))
+      }
+      match pagination(query, []) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      let value = match @attachment.get(connection, attachment_id) {
+        Ok(v) => v
+        Err(e) => return Err(e)
+      }
+      Ok(Some(response(200, success(attachment_json(value)))))
+    }
     ["v1", "health"] => {
       if verb != "GET" {
         return Err(@errors.method_not_allowed("GET"))
@@ -706,7 +857,7 @@ pub let agent_html : String =
   #|      <div class="conversation-head"><div><h1 id="chat-title">No conversation</h1><p id="agent-description"></p></div><div class="actions"><button id="rename-chat" type="button" disabled>Rename</button><button id="delete-chat" class="danger" type="button" disabled>Delete</button></div></div>
   #|      <div id="messages" class="messages" aria-live="polite"><div class="empty">No conversation selected</div></div>
   #|      <div id="error" class="error" hidden></div>
-  #|      <form id="composer"><textarea id="message-input" rows="3" maxlength="65536" placeholder="Message" disabled></textarea><button id="send" type="submit" disabled>Send</button></form>
+  #|      <form id="composer"><div class="compose-main"><textarea id="message-input" rows="3" maxlength="65536" placeholder="Message" disabled></textarea><div class="attachment-row"><label class="file-picker" for="attachment-input">Attach</label><input id="attachment-input" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,application/json,text/csv" disabled><span id="attachment-summary"></span></div></div><button id="send" type="submit" disabled>Send</button></form>
   #|    </main>
   #|  </div>
   #|  <script src="/agent/app.js" defer></script>
@@ -716,7 +867,7 @@ pub let agent_html : String =
 ///|
 pub let agent_css : String =
   #|:root{color-scheme:light;--ink:#18211f;--muted:#65706d;--line:#d9dfdc;--paper:#fff;--soft:#f3f6f4;--accent:#167c5a;--accent-dark:#0f6045;--danger:#b63d36;--tool:#a65422;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-  #|*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--paper);font-size:14px}.topbar{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 20px;gap:11px;background:#fbfcfb}.brand-mark{width:32px;height:32px;display:grid;place-items:center;background:var(--ink);color:#fff;border-radius:6px;font-size:12px;font-weight:800}.topbar strong{display:block;font-size:15px}.topbar span{display:block;color:var(--muted);font-size:11px;margin-top:2px}.workspace{height:calc(100vh - 58px);display:grid;grid-template-columns:280px minmax(0,1fr)}.sidebar{border-right:1px solid var(--line);padding:18px 14px;overflow:auto;background:var(--soft)}label,.section-head{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:0}select,textarea,button{font:inherit}select{width:100%;height:38px;border:1px solid #bfc8c4;background:#fff;border-radius:5px;padding:0 9px;margin:7px 0 20px}.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}button{border:1px solid #bfc8c4;background:#fff;color:var(--ink);border-radius:5px;padding:7px 10px;cursor:pointer}button:hover:not(:disabled){border-color:var(--accent);color:var(--accent-dark)}button:disabled{opacity:.45;cursor:not-allowed}.danger{color:var(--danger)}#chat-list{display:grid;gap:4px}.chat-item{width:100%;border-color:transparent;background:transparent;text-align:left;padding:9px}.chat-item.active{background:#fff;border-color:var(--line);box-shadow:0 1px 2px rgba(24,33,31,.05)}.chat-item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.chat-item small{display:block;color:var(--muted);margin-top:3px}.conversation{min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto}.conversation-head{min-height:76px;border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px}.conversation-head h1{font-size:17px;margin:0}.conversation-head p{font-size:12px;color:var(--muted);margin:4px 0 0}.actions{display:flex;gap:7px}.messages{overflow:auto;padding:22px max(20px,8vw);display:flex;flex-direction:column;gap:12px;background:#fcfdfc}.empty{margin:auto;color:var(--muted)}.message{max-width:760px;border-left:3px solid var(--line);padding:7px 11px;white-space:pre-wrap;overflow-wrap:anywhere}.message.user{align-self:flex-end;border-left:0;border-right:3px solid var(--accent);background:#eef8f3}.message.assistant{align-self:flex-start}.message.tool{align-self:flex-start;border-color:var(--tool);color:#633218;background:#fff7f0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.message.failed{opacity:.65}.message .meta{display:block;color:var(--muted);font-size:10px;margin-bottom:4px;text-transform:uppercase}.error{margin:0 20px 10px;padding:9px 11px;border-left:3px solid var(--danger);background:#fff1f0;color:#7f2823}#composer{border-top:1px solid var(--line);padding:14px 20px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}textarea{width:100%;resize:none;border:1px solid #bfc8c4;border-radius:5px;padding:10px 11px;line-height:1.4}#send{background:var(--accent);border-color:var(--accent);color:#fff;min-width:76px;height:42px}#send:hover:not(:disabled){background:var(--accent-dark);color:#fff}@media(max-width:760px){.workspace{grid-template-columns:1fr;grid-template-rows:190px minmax(0,1fr)}.sidebar{border-right:0;border-bottom:1px solid var(--line);padding:10px 14px}.sidebar select{margin-bottom:8px}.conversation-head{padding:10px 14px}.messages{padding:14px}.conversation-head p{display:none}#composer{padding:10px 14px}.topbar{height:52px}.workspace{height:calc(100vh - 52px)}}
+  #|*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--paper);font-size:14px}.topbar{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 20px;gap:11px;background:#fbfcfb}.brand-mark{width:32px;height:32px;display:grid;place-items:center;background:var(--ink);color:#fff;border-radius:6px;font-size:12px;font-weight:800}.topbar strong{display:block;font-size:15px}.topbar span{display:block;color:var(--muted);font-size:11px;margin-top:2px}.workspace{height:calc(100vh - 58px);display:grid;grid-template-columns:280px minmax(0,1fr)}.sidebar{border-right:1px solid var(--line);padding:18px 14px;overflow:auto;background:var(--soft)}label,.section-head{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:0}select,textarea,button{font:inherit}select{width:100%;height:38px;border:1px solid #bfc8c4;background:#fff;border-radius:5px;padding:0 9px;margin:7px 0 20px}.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}button{border:1px solid #bfc8c4;background:#fff;color:var(--ink);border-radius:5px;padding:7px 10px;cursor:pointer}button:hover:not(:disabled){border-color:var(--accent);color:var(--accent-dark)}button:disabled{opacity:.45;cursor:not-allowed}.danger{color:var(--danger)}#chat-list{display:grid;gap:4px}.chat-item{width:100%;border-color:transparent;background:transparent;text-align:left;padding:9px}.chat-item.active{background:#fff;border-color:var(--line);box-shadow:0 1px 2px rgba(24,33,31,.05)}.chat-item span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.chat-item small{display:block;color:var(--muted);margin-top:3px}.conversation{min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto auto}.conversation-head{min-height:76px;border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px}.conversation-head h1{font-size:17px;margin:0}.conversation-head p{font-size:12px;color:var(--muted);margin:4px 0 0}.actions{display:flex;gap:7px}.messages{overflow:auto;padding:22px max(20px,8vw);display:flex;flex-direction:column;gap:12px;background:#fcfdfc}.empty{margin:auto;color:var(--muted)}.message{max-width:760px;border-left:3px solid var(--line);padding:7px 11px;white-space:pre-wrap;overflow-wrap:anywhere}.message.user{align-self:flex-end;border-left:0;border-right:3px solid var(--accent);background:#eef8f3}.message.assistant{align-self:flex-start}.message.tool{align-self:flex-start;border-color:var(--tool);color:#633218;background:#fff7f0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.message.failed{opacity:.65}.message .meta{display:block;color:var(--muted);font-size:10px;margin-bottom:4px;text-transform:uppercase}.error{margin:0 20px 10px;padding:9px 11px;border-left:3px solid var(--danger);background:#fff1f0;color:#7f2823}#composer{border-top:1px solid var(--line);padding:14px 20px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.compose-main{min-width:0}.attachment-row{display:flex;align-items:center;gap:8px;min-height:25px;padding-top:5px}.file-picker{border:1px solid #bfc8c4;border-radius:5px;padding:4px 8px;cursor:pointer;color:var(--ink);text-transform:none}.file-picker:hover{border-color:var(--accent);color:var(--accent-dark)}#attachment-input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}#attachment-summary{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}textarea{width:100%;resize:none;border:1px solid #bfc8c4;border-radius:5px;padding:10px 11px;line-height:1.4}#send{background:var(--accent);border-color:var(--accent);color:#fff;min-width:76px;height:42px}#send:hover:not(:disabled){background:var(--accent-dark);color:#fff}@media(max-width:760px){.workspace{grid-template-columns:1fr;grid-template-rows:190px minmax(0,1fr)}.sidebar{border-right:0;border-bottom:1px solid var(--line);padding:10px 14px}.sidebar select{margin-bottom:8px}.conversation-head{padding:10px 14px}.messages{padding:14px}.conversation-head p{display:none}#composer{padding:10px 14px}.topbar{height:52px}.workspace{height:calc(100vh - 52px)}}
 
 ///|
 pub let agent_js : String =
@@ -726,18 +877,21 @@ pub let agent_js : String =
   #|async function api(path,options={}){const response=await fetch(path,{...options,headers:{"Content-Type":"application/json",...(options.headers||{})}});const body=await response.json();if(!response.ok){const error=new Error(body.error?.message||"Request failed");error.requestId=response.headers.get("X-Request-Id");throw error}return body}
   #|function showError(error){const box=el("error");box.textContent=error.requestId?`${error.message} (${error.requestId})`:error.message;box.hidden=false}
   #|function clearError(){el("error").hidden=true;el("error").textContent=""}
-  #|function setBusy(value){state.busy=value;el("send").disabled=value||!state.chatId;el("message-input").disabled=value||!state.chatId;el("new-chat").disabled=value;el("rename-chat").disabled=value||!state.chatId;el("delete-chat").disabled=value||!state.chatId}
+  #|function setBusy(value){state.busy=value;el("send").disabled=value||!state.chatId;el("message-input").disabled=value||!state.chatId;el("attachment-input").disabled=value||!state.chatId;el("new-chat").disabled=value;el("rename-chat").disabled=value||!state.chatId;el("delete-chat").disabled=value||!state.chatId}
   #|function node(tag,className,text){const value=document.createElement(tag);if(className)value.className=className;if(text!==undefined)value.textContent=text;return value}
   #|function renderAgents(){const select=el("agent-select");select.replaceChildren();for(const agent of state.agents){const option=node("option","",agent.name);option.value=agent.id;select.append(option)}select.value=state.agentId;const current=state.agents.find(item=>item.id===state.agentId);el("agent-description").textContent=current?.description||""}
   #|function renderChats(){const list=el("chat-list");list.replaceChildren();for(const chat of state.chats){const button=node("button",`chat-item${chat.id===state.chatId?" active":""}`);button.type="button";button.append(node("span","",chat.title||"Untitled"),node("small","",chat.active_turn_id?"Active":"Ready"));button.addEventListener("click",()=>openChat(chat.id));list.append(button)}}
-  #|function renderMessage(message){const kind=message.kind==="tool_result"?"tool":message.role;const item=node("article",`message ${kind}${message.turn_status==="failed"?" failed":""}`);item.append(node("span","meta",kind));const content=typeof message.content==="string"?message.content:JSON.stringify(message.content,null,2);item.append(node("div","",content));el("messages").append(item);return item}
+  #|function messageText(content){if(typeof content==="string")return content;if(Array.isArray(content?.content))return content.content.map(part=>part.type==="text"?part.text:part.type==="image"?"[Image]":"[File: "+(part.filename||"attachment")+"]").join(" ");return JSON.stringify(content,null,2)}
+  #|function renderMessage(message){const kind=message.kind==="tool_result"?"tool":message.role;const item=node("article",`message ${kind}${message.turn_status==="failed"?" failed":""}`);item.append(node("span","meta",kind));item.append(node("div","",messageText(message.content)));el("messages").append(item);return item}
   #|async function loadChats(){const result=await api(`/v1/chats?agent_id=${encodeURIComponent(state.agentId)}&limit=100&offset=0`);state.chats=result.data;renderChats()}
   #|async function openChat(id){clearError();state.chatId=id;renderChats();const chat=state.chats.find(item=>item.id===id);el("chat-title").textContent=chat?.title||"Conversation";const history=await api(`/v1/chats/${encodeURIComponent(id)}/messages?limit=100&offset=0`);const messages=el("messages");messages.replaceChildren();for(const message of history.data)renderMessage(message);setBusy(Boolean(chat?.active_turn_id));messages.scrollTop=messages.scrollHeight}
   #|async function createChat(){clearError();const result=await api("/v1/chats",{method:"POST",body:JSON.stringify({agent_id:state.agentId,title:""})});await loadChats();await openChat(result.data.id)}
   #|async function renameChat(){const chat=state.chats.find(item=>item.id===state.chatId);const title=window.prompt("Conversation title",chat?.title||"");if(!title)return;await api(`/v1/chats/${encodeURIComponent(state.chatId)}`,{method:"PATCH",body:JSON.stringify({title})});await loadChats();el("chat-title").textContent=title}
   #|async function deleteChat(){if(!window.confirm("Delete this conversation?"))return;await api(`/v1/chats/${encodeURIComponent(state.chatId)}`,{method:"DELETE"});state.chatId="";el("chat-title").textContent="No conversation";el("messages").replaceChildren(node("div","empty","No conversation selected"));await loadChats();setBusy(false)}
   #|function processEvent(name,data,live){if(name==="message.delta"){live.textContent+=data.delta||""}else if(name==="tool.started"||name==="tool.completed"||name==="hook.started"||name==="hook.completed"){renderMessage({kind:"tool_result",role:"tool",turn_status:"active",content:{event:name,name:data.name,kind:data.kind,ok:data.ok,summary:data.summary,error:data.error}})}else if(name==="turn.failed"){throw new Error(data.error?.message||"Turn failed")}}
-  #|async function streamTurn(content){const response=await fetch(`/v1/chats/${encodeURIComponent(state.chatId)}/turns`,{method:"POST",headers:{"Content-Type":"application/json","Accept":"text/event-stream"},body:JSON.stringify({content})});if(!response.ok){const body=await response.json();const error=new Error(body.error?.message||"Turn failed");error.requestId=response.headers.get("X-Request-Id");throw error}renderMessage({kind:"text",role:"user",turn_status:"active",content});const live=renderMessage({kind:"text",role:"assistant",turn_status:"active",content:""}).lastChild;const reader=response.body.getReader();const decoder=new TextDecoder();let buffer="";while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true}).replaceAll("\r\n","\n");let boundary;while((boundary=buffer.indexOf("\n\n"))>=0){const block=buffer.slice(0,boundary);buffer=buffer.slice(boundary+2);if(block.startsWith(":"))continue;let name="message";let data="";for(const line of block.split("\n")){if(line.startsWith("event:"))name=line.slice(6).trim();if(line.startsWith("data:"))data+=line.slice(5).trim()}if(data)processEvent(name,JSON.parse(data),live)}}}
-  #|async function send(event){event.preventDefault();const input=el("message-input");const content=input.value.trim();if(!content||state.busy)return;clearError();setBusy(true);input.value="";try{await streamTurn(content);await loadChats();await openChat(state.chatId)}catch(error){await openChat(state.chatId).catch(()=>{});showError(error)}finally{setBusy(false)}}
+  #|async function streamTurn(body,display){const response=await fetch(`/v1/chats/${encodeURIComponent(state.chatId)}/turns`,{method:"POST",headers:{"Content-Type":"application/json","Accept":"text/event-stream"},body:JSON.stringify(body)});if(!response.ok){const body=await response.json();const error=new Error(body.error?.message||"Turn failed");error.requestId=response.headers.get("X-Request-Id");throw error}renderMessage({kind:"text",role:"user",turn_status:"active",content:display});const live=renderMessage({kind:"text",role:"assistant",turn_status:"active",content:""}).lastChild;const reader=response.body.getReader();const decoder=new TextDecoder();let buffer="";while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true}).replaceAll("\r\n","\n");let boundary;while((boundary=buffer.indexOf("\n\n"))>=0){const block=buffer.slice(0,boundary);buffer=buffer.slice(boundary+2);if(block.startsWith(":"))continue;let name="message";let data="";for(const line of block.split("\n")){if(line.startsWith("event:"))name=line.slice(6).trim();if(line.startsWith("data:"))data+=line.slice(5).trim()}if(data)processEvent(name,JSON.parse(data),live)}}}
+  #|function fileBase64(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(",",2)[1]||"");reader.onerror=()=>reject(new Error("Could not read "+file.name));reader.readAsDataURL(file)})}
+  #|async function upload(file){const result=await api("/v1/attachments",{method:"POST",body:JSON.stringify({filename:file.name,media_type:file.type||"application/octet-stream",data_base64:await fileBase64(file)})});return result.data}
+  #|async function send(event){event.preventDefault();const input=el("message-input");const picker=el("attachment-input");const content=input.value.trim();const files=Array.from(picker.files||[]);if((!content&&!files.length)||state.busy)return;clearError();setBusy(true);try{if(!files.length){input.value="";await streamTurn({content},content)}else{const uploaded=[];for(const file of files)uploaded.push(await upload(file));const parts=[];if(content)parts.push({type:"text",text:content});for(const item of uploaded)parts.push(item.kind==="image"?{type:"image",attachment_id:item.id,detail:"auto"}:{type:"file",attachment_id:item.id,filename:item.filename});const message={role:"user",content:parts};input.value="";picker.value="";el("attachment-summary").textContent="";await streamTurn({message},message)}await loadChats();await openChat(state.chatId)}catch(error){await openChat(state.chatId).catch(()=>{});showError(error)}finally{setBusy(false)}}
   #|async function init(){try{const health=await api("/v1/health");el("health").textContent=health.data.ready?"Ready":"Unavailable";const agents=await api("/v1/agents");state.agents=agents.data;state.agentId=state.agents[0]?.id||"";renderAgents();await loadChats();if(state.chats[0])await openChat(state.chats[0].id)}catch(error){showError(error)}}
-  #|el("agent-select").addEventListener("change",async event=>{state.agentId=event.target.value;state.chatId="";renderAgents();await loadChats();if(state.chats[0])await openChat(state.chats[0].id)});el("new-chat").addEventListener("click",()=>createChat().catch(showError));el("rename-chat").addEventListener("click",()=>renameChat().catch(showError));el("delete-chat").addEventListener("click",()=>deleteChat().catch(showError));el("composer").addEventListener("submit",send);el("message-input").addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.isComposing){event.preventDefault();el("composer").requestSubmit()}});init();
+  #|el("agent-select").addEventListener("change",async event=>{state.agentId=event.target.value;state.chatId="";renderAgents();await loadChats();if(state.chats[0])await openChat(state.chats[0].id)});el("new-chat").addEventListener("click",()=>createChat().catch(showError));el("rename-chat").addEventListener("click",()=>renameChat().catch(showError));el("delete-chat").addEventListener("click",()=>deleteChat().catch(showError));el("attachment-input").addEventListener("change",event=>{const files=Array.from(event.target.files||[]);el("attachment-summary").textContent=files.map(file=>file.name).join(", ")});el("composer").addEventListener("submit",send);el("message-input").addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.isComposing){event.preventDefault();el("composer").requestSubmit()}});init();

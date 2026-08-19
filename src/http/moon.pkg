@@ -5,8 +5,11 @@ import {
   "ChaonanShen/MoonYao/process",
   "ChaonanShen/MoonYao/agent",
   "ChaonanShen/MoonYao/conversation",
+  "ChaonanShen/MoonYao/content",
+  "ChaonanShen/MoonYao/attachment",
   "ChaonanShen/MoonYao/llm",
   "moonbitlang/core/json",
   "moonbitlang/core/string",
+  "moonbitlang/x/codec/base64",
   "moonbit-community/sqlite3",
 }

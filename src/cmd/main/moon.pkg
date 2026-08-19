@@ -3,6 +3,7 @@ import {
   "ChaonanShen/MoonYao/app",
   "ChaonanShen/MoonYao/errors",
   "ChaonanShen/MoonYao/conversation",
+  "ChaonanShen/MoonYao/attachment",
   "ChaonanShen/MoonYao/http" @moonhttp,
   "ChaonanShen/MoonYao/model",
   "ChaonanShen/MoonYao/llm",

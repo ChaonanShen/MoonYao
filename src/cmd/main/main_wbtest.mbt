@@ -200,7 +200,8 @@ async test "HTTP turns stream public events and persist completion" {
           } else {
             "json-chat"
           },
-          "hello",
+          @moonhttp.turn_input({ "content": "hello" }).unwrap(),
+          "/unused-attachments",
           stream,
           connection,
           "turn-request",

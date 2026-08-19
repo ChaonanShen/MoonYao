@@ -159,6 +159,68 @@ test "conversation migration upgrades the P5 text-only message table" {
 }
 
 ///|
+test "canonical messages persist attachment references beside legacy fields" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  match migrate(connection) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  ignore(create_chat(connection, "chat", "todo", "canonical", 1))
+  ignore(begin_turn(connection, "turn", "user", "chat", "look", 2))
+  let attachment : @attachment.Attachment = {
+    id: "att_abcdef12",
+    storage_key: "ab/att_abcdef12",
+    filename: "image.png",
+    media_type: "image/png",
+    byte_size: 8,
+    sha256: "hash",
+    kind: @attachment.Image,
+    status: "ready",
+    created_at: 2,
+    deleted_at: 0,
+  }
+  match @attachment.insert(connection, attachment) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  let parts : Array[@content.ContentPart] = [
+    @content.TextPart("look"),
+    @content.ImageRef(attachment.id, @content.Auto),
+  ]
+  let message : @content.Message = {
+    role: @content.Assistant,
+    content: Some(@content.Parts(parts)),
+    name: None,
+    tool_call_id: None,
+    reasoning_content: None,
+    tool_calls: [],
+    refusal: None,
+  }
+  match
+    append_canonical(
+      connection, "assistant", "chat", "turn", "multipart", message, 3,
+    ) {
+    Err(error) => fail(error.message)
+    Ok(_) => ()
+  }
+  match list_canonical(connection, "chat") {
+    Ok(messages) => {
+      assert_eq(messages.length(), 2)
+      assert_eq(messages[1].message, message)
+    }
+    Err(error) => fail(error.message)
+  }
+  let refs = connection.prepare(
+    "SELECT COUNT(*) FROM _moonyao_message_attachments WHERE message_id = 'assistant'",
+  )
+  ignore(refs.step())
+  let count : Int = refs.column(index=0)
+  refs.finalize()
+  assert_eq(count, 1)
+  connection.close()
+}
+
+///|
 test "platform queries filter chats, hide internal messages, and report active turns" {
   let connection = @sqlite3.Connection::open(":memory:")
   ignore(migrate(connection))

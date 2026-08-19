@@ -136,7 +136,7 @@ pub fn migrate(
       }
     }
   }
-  Ok(())
+  migrate_v3(connection)
 }
 
 ///|
@@ -161,6 +161,10 @@ pub fn append_message(
     return Err(
       @errors.invalid_argument("transcript message is too large", "message"),
     )
+  }
+  let canonical = match canonical_for_legacy(role, kind, source) {
+    Ok(value) => value.stringify()
+    Err(error) => return Err(error)
   }
   match exec(connection, "BEGIN IMMEDIATE", "message.append") {
     Err(error) => return Err(error)
@@ -194,7 +198,7 @@ pub fn append_message(
     }
   }
   let statement = connection.prepare(
-    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
+    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at, canonical_json) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
   ) catch {
     _ => {
       rollback(connection)
@@ -214,6 +218,7 @@ pub fn append_message(
     statement.bind(index=6, kind)
     statement.bind(index=7, source)
     statement.bind(index=8, now)
+    statement.bind(index=9, canonical)
     statement.step_once()
     statement.finalize()
   } catch {
@@ -610,6 +615,7 @@ pub fn begin_turn(
     Err(e) => return Err(e)
     Ok(_) => ()
   }
+  let canonical = @content.encode(@content.text_message(@content.User, content)).stringify()
   match exec(connection, "BEGIN IMMEDIATE", "turn.begin") {
     Err(e) => return Err(e)
     Ok(_) => ()
@@ -665,7 +671,7 @@ pub fn begin_turn(
     }
   }
   let message = connection.prepare(
-    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at) VALUES (?, ?, ?, ?, 'user', 'text', ?, 'completed', ?)",
+    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at, canonical_json) VALUES (?, ?, ?, ?, 'user', 'text', ?, 'completed', ?, ?)",
   ) catch {
     _ => {
       rollback(connection)
@@ -681,6 +687,7 @@ pub fn begin_turn(
     message.bind(index=4, sequence)
     message.bind(index=5, Json::string(content).stringify())
     message.bind(index=6, now)
+    message.bind(index=7, canonical)
     message.step_once()
     message.finalize()
   } catch {
@@ -714,6 +721,9 @@ pub fn complete_turn(
   if content.length() == 0 {
     return Err(@errors.llm_error("model returned empty text"))
   }
+  let canonical = @content.encode(
+    @content.text_message(@content.Assistant, content),
+  ).stringify()
   match exec(connection, "BEGIN IMMEDIATE", "turn.complete") {
     Err(e) => return Err(e)
     Ok(_) => ()
@@ -778,7 +788,7 @@ pub fn complete_turn(
     }
   }
   let message = connection.prepare(
-    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at) VALUES (?, ?, ?, ?, 'assistant', 'text', ?, 'completed', ?)",
+    "INSERT INTO _moonyao_messages(id, chat_id, turn_id, sequence, role, kind, content_json, status, created_at, canonical_json) VALUES (?, ?, ?, ?, 'assistant', 'text', ?, 'completed', ?, ?)",
   ) catch {
     _ => {
       rollback(connection)
@@ -794,6 +804,7 @@ pub fn complete_turn(
     message.bind(index=4, sequence)
     message.bind(index=5, Json::string(content).stringify())
     message.bind(index=6, now)
+    message.bind(index=7, canonical)
     message.step_once()
     message.finalize()
   } catch {

@@ -1,0 +1,8 @@
+{
+  "id": "gemini",
+  "type": "gemini_generate_content",
+  "base_url": "${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}",
+  "api_key_env": "${GEMINI_API_KEY_ENV:-GEMINI_API_KEY}",
+  "model": "${GEMINI_MODEL:-gemini-2.5-flash}",
+  "timeout_ms": 60000
+}

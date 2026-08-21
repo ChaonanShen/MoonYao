@@ -2,6 +2,14 @@
 
 本文件记录 MoonYao Core 的重要变更。
 
+## 未发布
+
+### 新增
+
+- 支持加载多个具名 Connector，并由每个 Agent 显式选择 Connector。
+- 新增 Anthropic Messages 与 Gemini GenerateContent 普通、SSE、图片和工具调用适配器；与
+  OpenAI-compatible 适配器共享 canonical message、usage、deadline、cancel 和 retry 语义。
+
 ## 0.1.0 - 2026-08-18
 
 ### 变更

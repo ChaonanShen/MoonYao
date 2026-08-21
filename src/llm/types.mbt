@@ -149,6 +149,22 @@ fn env_name(value : String) -> Bool {
 }
 
 ///|
+fn connector_id(value : String) -> Bool {
+  if value.length() == 0 {
+    return false
+  }
+  for index = 0; index < value.length(); index = index + 1 {
+    let character = value.code_unit_at(index).unsafe_to_char()
+    let letter = character.is_ascii_alphabetic()
+    let digit = character >= '0' && character <= '9'
+    if !(letter || character == '_' || (index > 0 && digit)) {
+      return false
+    }
+  }
+  true
+}
+
+///|
 fn valid_model(value : String) -> Bool {
   if value.length() == 0 || value.length() > 128 {
     return false
@@ -203,21 +219,18 @@ pub fn parse_connector(
     Ok(v) => v
     Err(e) => return Err(e)
   }
-  if id != "default" {
-    return Err(
-      @errors.invalid_dsl("connector id must be 'default'", path + ".id"),
-    )
+  if !connector_id(id) {
+    return Err(@errors.invalid_dsl("connector id is invalid", path + ".id"))
   }
   let connector_type = match required_string(object, "type", path) {
     Ok(v) => v
     Err(e) => return Err(e)
   }
-  if connector_type != "openai_chat" {
+  if !["openai_chat", "anthropic_messages", "gemini_generate_content"].contains(
+      connector_type,
+    ) {
     return Err(
-      @errors.invalid_dsl(
-        "connector type must be 'openai_chat'",
-        path + ".type",
-      ),
+      @errors.invalid_dsl("unsupported connector type", path + ".type"),
     )
   }
   let mut base_url = match required_string(object, "base_url", path) {

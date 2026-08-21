@@ -47,6 +47,10 @@ body、SQL、数据库路径、attachment storage key 或本地文件路径。
 Agent 自己的 prompt 保持有效。这使常见 OpenAI SDK 和前端可以直接发起单轮请求，同时避免
 客户端 history 覆盖服务端的 canonical conversation。
 
+该兼容接口的 HTTP shape 始终保持 OpenAI Chat Completions 子集，但实际出站 provider 由目标
+Agent 的 `connector` 决定，可为 OpenAI-compatible、Anthropic Messages 或 Gemini
+GenerateContent。MoonYao 不执行自动 fallback 或 provider 路由。
+
 每个 completion 调用都会新建一条持久化 chat；需要续接同一会话、附件、取消、retry 或 event
 replay 时，应使用 MoonYao 原生的 `/v1/chats/:id/turns` API。暂不支持 OpenAI message content
 parts、tool/function calling、`response_format`、`n`、logprobs 或 provider conversation ID。

@@ -9,7 +9,7 @@ MoonYao Core 是一个面向 [Yao Agent](https://yaoapps.com/docs/tutorials/en-u
 ```text
 Agent/Prompt DSL -> SQLite 持久化会话 -> Agent Runtime
                                            |          |
-                          Process 工具基础设施       OpenAI-compatible streaming chat
+                          Process 工具基础设施       Multi-provider streaming chat
                     (Model / Flow / SQLite / HTTP)
 ```
 
@@ -19,15 +19,17 @@ Model、Process、Flow、SQLite 和 HTTP 不是独立的通用应用引擎产品
 ## 当前状态
 
 仓库当前已完成严格 Agent/Connector/Prompt DSL、SQLite 持久化 chat/turn/message、
-OpenAI-compatible 普通及流式 Chat Completions、`agent chat` 多轮会话、受限 JSON Schema、
+OpenAI-compatible、Anthropic Messages 与 Gemini GenerateContent 普通及流式调用、`agent chat`
+多轮会话、受限 JSON Schema、
 Process-backed tools、有界 tool loop、可选 Process hooks，以及本地 Agent JSON/SSE API
 和内置 Web CUI。作为 Agent 工具基础，仓库也已完成 Model/Process/Flow DSL、SQLite CRUD
 和异步 HTTP/1.1 Todo API。
 
 ## 支持范围
 
-第一版仅支持 MoonBit Native、SQLite、严格 JSON DSL 和单一 OpenAI-compatible 文本
-connector。当前尚未实现 RAG、附件或 multi-agent；也不实现 Yao 的 JavaScript 运行时、
+第一版仅支持 MoonBit Native、SQLite、严格 JSON DSL，以及由 Agent 显式选择的
+OpenAI-compatible、Anthropic Messages 或 Gemini GenerateContent connector。当前尚未实现
+RAG 或 multi-agent；也不实现 Yao 的 JavaScript 运行时、
 插件、完整应用引擎、OpenAPI、认证、
 多租户、多数据库、Join 或复杂 Flow 控制。
 
@@ -35,11 +37,11 @@ connector。当前尚未实现 RAG、附件或 multi-agent；也不实现 Yao �
 | --- | --- |
 | Agent/Prompt/Tool 严格 JSON DSL | 支持 |
 | SQLite 持久化 chat、turn、message | 支持，单数据库 |
-| OpenAI-compatible Chat Completions | 支持，单 connector、文本与 SSE |
+| OpenAI-compatible、Anthropic、Gemini | 支持，多 connector、文本/图片、工具与 SSE |
 | Process tools 与 hooks | 支持，有 allowlist、轮次、数量和大小限制 |
 | Agent JSON API、SSE 与内置 Web CUI | 支持，loopback 本地单用户 |
 | 认证、TLS、CORS、多租户 | 不支持 |
-| 多 provider、RAG、附件、多 Agent、外部 MCP | 不支持 |
+| provider fallback/路由、RAG、多 Agent、外部 MCP | 不支持 |
 
 ## 获取与安装
 
@@ -99,8 +101,9 @@ MoonYao Core bootstrap: Native runtime is ready.
 ## Agent 快速开始
 
 `example/todo-agent` 是主要发布示例，包含完整的 `todo` Agent、Process 工具和 Todo API。
-Connector 固定放在
-`connectors/default.json`，API key 只填写环境变量名，不写入 DSL：
+Connector 放在 `connectors/*.json`，每个文件声明唯一 `id`；Agent 的 `connector` 字段显式选择
+其中一个。支持 `openai_chat`、`anthropic_messages` 和 `gemini_generate_content`，不会自动
+fallback 或路由。API key 只填写环境变量名，不写入 DSL：
 
 ```json
 {
@@ -112,6 +115,10 @@ Connector 固定放在
   "timeout_ms": 60000
 }
 ```
+
+Anthropic 与 Gemini 示例分别见 `connectors/anthropic.json` 和 `connectors/gemini.json`；默认
+读取 `ANTHROPIC_API_KEY` 或 `GEMINI_API_KEY`。要切换 provider，只需把 Agent 的
+`connector` 改成对应 ID，并为该 connector 配置模型与 key 环境变量。
 
 Agent 位于 `agents/<id>/agent.json`，同目录的 `prompts.json` 只接受 1 至 8 条
 `system` 文本消息。`tools.json` 将受限 object JSON Schema 映射到已注册 Process，Agent

@@ -208,14 +208,10 @@ async fn agent_chat_command(
     Some(value) => value
     None => return Err(@errors.invalid_argument("agent was not found", "agent"))
   }
-  let connector = match application.connector {
-    Some(value) => value
-    None =>
-      return Err(
-        @errors.invalid_dsl(
-          "connector is not configured", "connectors/default.json",
-        ),
-      )
+  let connector = match
+    find_connector(application.connectors, agent.connector) {
+    Ok(value) => value
+    Err(error) => return Err(error)
   }
   let api_key = match @env.get_env_var(connector.api_key_env) {
     Some(value) if value.length() > 0 => value
@@ -275,7 +271,7 @@ async fn agent_chat_command(
     connection,
     agent,
     connector,
-    @agent.OpenAI(connector, api_key),
+    @agent.Provider(connector, api_key),
     chat_id,
     message,
     ids,
@@ -390,6 +386,19 @@ fn find_agent(
     }
   }
   Err(@errors.agent_not_found())
+}
+
+///|
+fn find_connector(
+  connectors : Array[@llm.Connector],
+  id : String,
+) -> Result[@llm.Connector, @errors.EngineError] {
+  for connector in connectors {
+    if connector.id == id {
+      return Ok(connector)
+    }
+  }
+  Err(@errors.invalid_dsl("connector is not configured", "connectors." + id))
 }
 
 ///|
@@ -750,14 +759,11 @@ async fn run_http_turn(
       return
     }
   }
-  let connector = match application.connector {
-    Some(value) => value
-    None => {
-      send_platform_error(
-        connection,
-        @errors.llm_error("connector is not configured"),
-        id,
-      )
+  let connector = match
+    find_connector(application.connectors, selected.connector) {
+    Ok(value) => value
+    Err(error) => {
+      send_platform_error(connection, error, id)
       return
     }
   }
@@ -941,7 +947,7 @@ async fn run_http_turn(
             database,
             selected,
             connector,
-            @agent.OpenAI(connector, api_key),
+            @agent.Provider(connector, api_key),
             Some(chat_id),
             content.message,
             content.preview,
@@ -957,7 +963,7 @@ async fn run_http_turn(
             database,
             selected,
             connector,
-            @agent.OpenAI(connector, api_key),
+            @agent.Provider(connector, api_key),
             Some(chat_id),
             content.preview,
             ids,

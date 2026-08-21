@@ -7,7 +7,7 @@ pub(all) struct Application {
   globals : Map[String, Json]
   apis : Array[@http.Api]
   listen : String
-  connector : @llm.Connector?
+  connectors : Array[@llm.Connector]
   agents : Array[@agent.Agent]
 } derive(Debug)
 
@@ -226,7 +226,7 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
     }
   }
   let connector_directory = root + "/connectors"
-  let mut connector : @llm.Connector? = None
+  let connectors : Array[@llm.Connector] = []
   if @fs.path_exists(connector_directory) {
     let connector_entries = @fs.read_dir(connector_directory) catch {
       (_ : @fs.IOError) =>
@@ -238,23 +238,22 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
     }
     connector_entries.sort()
     for entry in connector_entries {
-      if entry.has_suffix(".json") && entry != "default.json" {
-        return Err(
-          @errors.invalid_dsl(
-            "P5 supports only connectors/default.json",
-            "connectors/" + entry,
-          ),
-        )
-      }
-    }
-    if @fs.path_exists(connector_directory + "/default.json") {
-      let json = match read_json(connector_directory + "/default.json") {
-        Ok(v) => v
-        Err(e) => return Err(e)
-      }
-      connector = match @llm.parse_connector(json, "connectors/default.json") {
-        Ok(v) => Some(v)
-        Err(e) => return Err(e)
+      if entry.has_suffix(".json") {
+        let relative_path = "connectors/" + entry
+        let json = match read_json(connector_directory + "/" + entry) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        let parsed = match @llm.parse_connector(json, relative_path) {
+          Ok(v) => v
+          Err(e) => return Err(e)
+        }
+        if connectors.any(existing => existing.id == parsed.id) {
+          return Err(
+            @errors.invalid_dsl("duplicate connector id", relative_path + ".id"),
+          )
+        }
+        connectors.push(parsed)
       }
     }
   }
@@ -398,14 +397,27 @@ pub fn load(root : String) -> Result[Application, @errors.EngineError] {
       }
     }
   }
-  if !agents.is_empty() && connector is None {
-    return Err(
-      @errors.invalid_dsl(
-        "agents require connectors/default.json", "connectors/default.json",
-      ),
-    )
+  for agent in agents {
+    if !connectors.any(connector => connector.id == agent.connector) {
+      return Err(
+        @errors.invalid_dsl(
+          "unknown agent connector",
+          "agents/" + agent.id + "/agent.json.connector",
+        ),
+      )
+    }
   }
-  Ok({ name, database, models, flows, globals, apis, listen, connector, agents })
+  Ok({
+    name,
+    database,
+    models,
+    flows,
+    globals,
+    apis,
+    listen,
+    connectors,
+    agents,
+  })
 }
 
 ///|

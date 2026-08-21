@@ -192,6 +192,9 @@ async test "HTTP turns stream public events and persist completion" {
     )
     ignore(@conversation.create_chat(database, "json-chat", "todo", "JSON", 1))
     ignore(
+      @conversation.create_chat(database, "openai-chat", "todo", "OpenAI", 1),
+    )
+    ignore(
       @conversation.create_chat(
         database, "idempotent-chat", "todo", "Idempotent", 1,
       ),
@@ -214,12 +217,17 @@ async test "HTTP turns stream public events and persist completion" {
           stream_turn_events(database, turn.id, 1, connection, "resume-request")
           return
         }
-        let stream = request.path == "/stream" || request.path == "/disconnect"
+        let stream = request.path == "/stream" ||
+          request.path == "/disconnect" ||
+          request.path == "/openai-stream"
         run_http_turn(
           application,
           database,
           if request.path == "/stream" {
             "stream-chat"
+          } else if request.path == "/openai" ||
+            request.path == "/openai-stream" {
+            "openai-chat"
           } else if request.path == "/disconnect" {
             "disconnect-chat"
           } else if request.path == "/idempotent" ||
@@ -244,6 +252,11 @@ async test "HTTP turns stream public events and persist completion" {
             ""
           },
           "",
+          if request.path == "/openai" || request.path == "/openai-stream" {
+            Some("todo")
+          } else {
+            None
+          },
           connection,
           "turn-request",
           @agent.TurnSupervisor::new(),
@@ -277,6 +290,23 @@ async test "HTTP turns stream public events and persist completion" {
     assert_eq(json_response.code, 200)
     assert_true(json_body.text().contains("\"content\":\"hello\""))
     assert_true(json_body.text().contains("\"next\":null"))
+    let (openai_response, openai_body) = @asynchttp.post(
+      base + "/openai",
+      "{}",
+      headers={ "Content-Type": "application/json" },
+    )
+    assert_eq(openai_response.code, 200)
+    assert_true(openai_body.text().contains("\"object\":\"chat.completion\""))
+    assert_true(openai_body.text().contains("\"role\":\"assistant\""))
+    assert_true(openai_body.text().contains("\"total_tokens\":3"))
+    let (openai_stream_response, openai_stream_body) = @asynchttp.post(
+      base + "/openai-stream",
+      "{}",
+      headers={ "Content-Type": "application/json" },
+    )
+    assert_eq(openai_stream_response.code, 200)
+    assert_true(openai_stream_body.text().contains("chat.completion.chunk"))
+    assert_true(openai_stream_body.text().contains("data: [DONE]"))
     let before_idempotent = provider_requests.val
     let (first_idempotent, _) = @asynchttp.post(base + "/idempotent", "{}", headers={
       "Content-Type": "application/json",

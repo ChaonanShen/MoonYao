@@ -295,6 +295,81 @@ test "platform inputs and pagination are strict" {
 }
 
 ///|
+test "OpenAI-compatible completion input selects the latest user message" {
+  match
+    openai_completion_input({
+      "model": "todo",
+      "messages": [
+        { "role": "system", "content": "ignored by the Agent prompt" },
+        { "role": "user", "content": "first" },
+        { "role": "assistant", "content": "previous answer" },
+        { "role": "user", "content": "latest" },
+      ],
+      "stream": true,
+      "temperature": 0.2,
+      "max_tokens": 32,
+    }) {
+    Ok(value) => {
+      assert_eq(value.model, "todo")
+      assert_eq(value.input.preview, "latest")
+      assert_true(value.stream)
+    }
+    Err(error) => fail(error.message)
+  }
+  match openai_completion_input({ "model": "todo", "messages": [] }) {
+    Err(error) => assert_eq(error.path, "body.messages")
+    Ok(_) => fail("expected missing messages rejection")
+  }
+  match
+    openai_completion_input({
+      "model": "todo",
+      "messages": [{ "role": "user", "content": [{ "type": "text" }] }],
+    }) {
+    Err(error) => assert_eq(error.path, "body.messages[0].content")
+    Ok(_) => fail("expected multimodal content rejection")
+  }
+}
+
+///|
+test "platform dispatches OpenAI-compatible completion action" {
+  let connection = @sqlite3.Connection::open(":memory:")
+  ignore(@conversation.migrate(connection))
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "POST",
+      "/v1/chat/completions",
+      { "model": "todo", "messages": [{ "role": "user", "content": "hello" }] },
+      Map([]),
+      "unused",
+      1,
+    ) {
+    Ok(Some(OpenAICompletion(input))) => {
+      assert_eq(input.model, "todo")
+      assert_eq(input.input.preview, "hello")
+      assert_false(input.stream)
+    }
+    _ => fail("expected OpenAI completion action")
+  }
+  match
+    dispatch_platform(
+      [platform_agent()],
+      connection,
+      "GET",
+      "/v1/chat/completions",
+      {},
+      Map([]),
+      "unused",
+      1,
+    ) {
+    Err(error) => assert_eq(error.code, @errors.MethodNotAllowed)
+    _ => fail("expected method rejection")
+  }
+  connection.close()
+}
+
+///|
 test "platform dispatches retry and event replay actions safely" {
   let connection = @sqlite3.Connection::open(":memory:")
   ignore(@conversation.migrate(connection))

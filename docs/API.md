@@ -21,6 +21,7 @@ body、SQL、数据库路径、attachment storage key 或本地文件路径。
 | --- | --- | --- |
 | `GET` | `/v1/health` | readiness |
 | `GET` | `/v1/agents` | 返回脱敏 Agent metadata |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions 兼容子集 |
 | `POST` | `/v1/chats` | 创建 chat；body 为 `agent_id` 和可选 `title` |
 | `GET` | `/v1/chats` | 按 `agent_id`、`limit`、`offset` 分页 |
 | `GET` | `/v1/chats/:id` | 读取 chat 和 `active_turn_id` |
@@ -37,6 +38,32 @@ body、SQL、数据库路径、attachment storage key 或本地文件路径。
 | `GET` | `/agent/` | 内置 Web CUI |
 
 `/v1` 与 `/agent` 是保留命名空间，应用 API DSL 不能覆盖。
+
+## OpenAI Chat Completions 兼容子集
+
+`POST /v1/chat/completions` 接受 `model`、`messages` 和可选 `stream`、`temperature`、
+`max_tokens`、`user`。`model` 是已配置的 MoonYao Agent ID。接口接受 `system`、`user` 和
+`assistant` string messages，但当前一次调用只将最后一个 `user` message 作为新的持久化 turn；
+Agent 自己的 prompt 保持有效。这使常见 OpenAI SDK 和前端可以直接发起单轮请求，同时避免
+客户端 history 覆盖服务端的 canonical conversation。
+
+每个 completion 调用都会新建一条持久化 chat；需要续接同一会话、附件、取消、retry 或 event
+replay 时，应使用 MoonYao 原生的 `/v1/chats/:id/turns` API。暂不支持 OpenAI message content
+parts、tool/function calling、`response_format`、`n`、logprobs 或 provider conversation ID。
+
+普通响应使用 OpenAI 的 `chat.completion` shape；`stream: true` 使用 `text/event-stream`，发送
+`chat.completion.chunk` data frames 并以 `data: [DONE]` 结束。工具执行对 stream 客户端保持
+内部实现细节，不暴露 tool argument 或结果 transcript。
+
+```json
+{
+  "model": "todo",
+  "messages": [
+    { "role": "user", "content": "List my open tasks" }
+  ],
+  "stream": false
+}
+```
 
 ## Turn 输入
 

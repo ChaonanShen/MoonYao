@@ -182,7 +182,7 @@ async test "HTTP turns stream public events and persist completion" {
       globals: Map([]),
       apis: [],
       listen: "127.0.0.1:0",
-      connector: Some(connector),
+      connectors: [connector],
       agents: [tcp_test_agent()],
     }
     let database = @sqlite3.Connection::open(":memory:")

@@ -36,6 +36,7 @@ pub(all) enum Client {
   Fake(FakeResponse)
   FakeSequence(Array[FakeResponse])
   OpenAI(@llm.Connector, String)
+  Provider(@llm.Connector, String)
 } derive(Debug)
 
 ///|
@@ -180,6 +181,10 @@ async fn complete(
     }
     OpenAI(connector, api_key) =>
       @llm.complete_http_until(connector, request, api_key, sink, deadline_at)
+    Provider(connector, api_key) =>
+      @llm.complete_provider_until(
+        connector, request, api_key, sink, deadline_at,
+      )
   }
 }
 

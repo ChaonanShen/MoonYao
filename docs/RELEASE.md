@@ -11,8 +11,9 @@ Todo Agent JSON -> persistent chat -> LLM -> Process tools -> SSE/Web CUI
 
 ## 已知限制
 
-只支持 MoonBit Native、SQLite、单一 OpenAI-compatible connector 和可信 loopback 本地单用户
-环境。没有认证、TLS、CORS、多租户、provider fallback、RAG、多 Agent 或外部 MCP。
+只支持 MoonBit Native、SQLite，以及由 Agent 显式选择的 OpenAI-compatible、Anthropic
+Messages 或 Gemini GenerateContent connector 和可信 loopback 本地单用户环境。没有认证、
+TLS、CORS、多租户、provider fallback/路由、RAG、多 Agent 或外部 MCP。
 attachment 只支持受限 image 和 UTF-8 text 类型。同步 Process timeout/cancel 不能强制抢占，
 retry 可能重复 Process side effect，且 tool side effect 没有通用事务回滚。
 

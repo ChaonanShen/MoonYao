@@ -44,11 +44,16 @@ pub fn chat_messages_json(messages : Array[ChatMessage]) -> Array[Json] {
 }
 
 ///|
-pub fn request_json(request : ChatRequest) -> Json {
-  let messages : Array[Json] = match request.wire_messages {
+pub fn request_wire_messages(request : ChatRequest) -> Array[Json] {
+  match request.wire_messages {
     Some(values) => values
-    None => request.messages.map(wire_message)
+    None => chat_messages_json(request.messages)
   }
+}
+
+///|
+pub fn request_json(request : ChatRequest) -> Json {
+  let messages = request_wire_messages(request)
   let result : Map[String, Json] = {
     "model": request.model,
     "messages": messages,

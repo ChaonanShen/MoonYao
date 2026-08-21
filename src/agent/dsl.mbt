@@ -86,12 +86,9 @@ pub fn parse_agent(
     Ok(v) => v
     Err(e) => return Err(e)
   }
-  if connector != "default" {
+  if !@model.is_identifier(connector) {
     return Err(
-      @errors.invalid_dsl(
-        "agent connector must be 'default'",
-        path + ".connector",
-      ),
+      @errors.invalid_dsl("agent connector is invalid", path + ".connector"),
     )
   }
   let description = match object.get("description") {

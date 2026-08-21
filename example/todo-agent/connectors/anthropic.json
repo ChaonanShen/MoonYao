@@ -1,0 +1,8 @@
+{
+  "id": "anthropic",
+  "type": "anthropic_messages",
+  "base_url": "${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}",
+  "api_key_env": "${ANTHROPIC_API_KEY_ENV:-ANTHROPIC_API_KEY}",
+  "model": "${ANTHROPIC_MODEL:-claude-sonnet-4-5}",
+  "timeout_ms": 60000
+}

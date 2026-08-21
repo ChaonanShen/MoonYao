@@ -29,7 +29,16 @@ test "application loader resolves both release examples" {
         assert_eq(application.agents[0].id, "todo")
         assert_eq(application.agents[0].prompts.length(), 1)
         assert_eq(application.agents[0].tools.length(), 4)
-        assert_true(application.connector is Some(_))
+        if path == "example/todo-agent" {
+          assert_eq(application.connectors.length(), 3)
+          assert_true(
+            application.connectors.any(item => item.id == "anthropic"),
+          )
+          assert_true(application.connectors.any(item => item.id == "gemini"))
+        } else {
+          assert_eq(application.connectors.length(), 1)
+        }
+        assert_true(application.connectors.any(item => item.id == "default"))
       }
       Err(error) => fail(path + ": " + error.message + " at " + error.path)
     }

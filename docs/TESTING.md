@@ -27,8 +27,9 @@ docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" moonyao-dev run src/
 ```
 
 Agent 是主要验收路径，测试不需要真实 provider 或 API key。测试套件使用内存 SQLite 和
-loopback fake LLM server，覆盖严格 Connector/Agent/Prompt DSL、普通与分块 SSE 响应、
-Authorization 和请求 JSON、HTTP 500、timeout、三轮持久化、active-turn 冲突、启动恢复及
+loopback fake LLM server，覆盖严格的多 Connector/Agent/Prompt DSL、OpenAI-compatible、
+Anthropic Messages 和 Gemini GenerateContent 普通与分块 SSE 响应、各协议认证 header 和请求
+JSON、HTTP 500、timeout、三轮持久化、active-turn 冲突、启动恢复及
 硬删除。canonical message 测试覆盖 text/image/file parts、attachment metadata 与完整性、
 provider-boundary 投影、引用持久化和旧 text schema 升级。Process tools 测试覆盖 schema
 meta-validation、运行时参数校验、流式 tool arguments 聚合、allowlist、tool transcript、
@@ -61,7 +62,7 @@ key；自动化测试使用 loopback fake provider，不需要外部网络。
 人工验证真实 provider 时，先运行 `migrate`，再设置 DSL 所指向的环境变量并执行
 `agent chat`；不得把 key 写进 fixture、命令日志或仓库文件。
 
-0.1.0 发布验收日为 2026-08-19。自动离线验收覆盖 110 个测试；当前环境没有提供真实
+0.1.0 发布验收日为 2026-08-19。当前自动离线验收覆盖 118 个测试；当前环境没有提供真实
 connector 凭据，因此真实 provider 三轮、工具循环和无效 key 人工检查未执行，不能将其
 解读为通过。
 

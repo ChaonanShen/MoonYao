@@ -280,6 +280,13 @@ pub(all) struct TurnInput {
 } derive(Eq, Debug)
 
 ///|
+pub(all) struct OpenAICompletionInput {
+  model : String
+  input : TurnInput
+  stream : Bool
+} derive(Eq, Debug)
+
+///|
 pub fn retry_turn_input(message : @content.Message) -> TurnInput {
   {
     preview: message_preview(message),
@@ -521,6 +528,150 @@ pub fn turn_input(value : Json) -> Result[TurnInput, @errors.EngineError] {
 }
 
 ///|
+fn openai_message_content(
+  value : Json,
+  path : String,
+) -> Result[String, @errors.EngineError] {
+  guard value is String(content) else {
+    return Err(
+      @errors.invalid_argument("only string message content is supported", path),
+    )
+  }
+  if content.length() == 0 || !has_at_most_utf8_bytes(content, 65536) {
+    return Err(
+      @errors.invalid_argument("message content is invalid or too large", path),
+    )
+  }
+  Ok(content)
+}
+
+///|
+pub fn openai_completion_input(
+  value : Json,
+) -> Result[OpenAICompletionInput, @errors.EngineError] {
+  let object = match
+    strict_object(
+      value,
+      ["model", "messages", "stream", "temperature", "max_tokens", "user"],
+      "body",
+    ) {
+    Ok(value) => value
+    Err(error) => return Err(error)
+  }
+  let model = match object.get("model") {
+    Some(String(value)) if value.length() > 0 => value
+    _ => return Err(@errors.invalid_argument("model is required", "body.model"))
+  }
+  let stream = match object.get("stream") {
+    None => false
+    Some(True) => true
+    Some(False) => false
+    _ =>
+      return Err(
+        @errors.invalid_argument("stream must be a boolean", "body.stream"),
+      )
+  }
+  match object.get("temperature") {
+    None | Some(Number(_, ..)) => ()
+    _ =>
+      return Err(
+        @errors.invalid_argument(
+          "temperature must be a number", "body.temperature",
+        ),
+      )
+  }
+  match object.get("max_tokens") {
+    None => ()
+    Some(Number(value, ..)) if value.to_int().to_double() == value &&
+      value > 0.0 => ()
+    _ =>
+      return Err(
+        @errors.invalid_argument(
+          "max_tokens must be a positive integer", "body.max_tokens",
+        ),
+      )
+  }
+  match object.get("user") {
+    None | Some(String(_)) => ()
+    _ =>
+      return Err(@errors.invalid_argument("user must be a string", "body.user"))
+  }
+  let messages = match object.get("messages") {
+    Some(Array(value)) if !value.is_empty() => value
+    _ =>
+      return Err(
+        @errors.invalid_argument(
+          "messages must be a non-empty array", "body.messages",
+        ),
+      )
+  }
+  let mut latest_user : String? = None
+  for index = 0; index < messages.length(); index = index + 1 {
+    let message = match
+      strict_object(
+        messages[index],
+        ["role", "content", "name"],
+        "body.messages[" + index.to_string() + "]",
+      ) {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    let role = match message.get("role") {
+      Some(String(value)) if ["system", "user", "assistant"].contains(value) =>
+        value
+      _ =>
+        return Err(
+          @errors.invalid_argument(
+            "role must be system, user, or assistant",
+            "body.messages[" + index.to_string() + "].role",
+          ),
+        )
+    }
+    match message.get("name") {
+      None | Some(String(_)) => ()
+      _ =>
+        return Err(
+          @errors.invalid_argument(
+            "name must be a string",
+            "body.messages[" + index.to_string() + "].name",
+          ),
+        )
+    }
+    let content = match
+      openai_message_content(
+        message.get("content").unwrap(),
+        "body.messages[" + index.to_string() + "].content",
+      ) {
+      Ok(value) => value
+      Err(error) => return Err(error)
+    }
+    if role == "user" {
+      latest_user = Some(content)
+    }
+  }
+  let content = match latest_user {
+    Some(value) => value
+    None =>
+      return Err(
+        @errors.invalid_argument(
+          "messages must include a user message", "body.messages",
+        ),
+      )
+  }
+  Ok({
+    model,
+    input: {
+      preview: content,
+      message: @content.text_message(@content.User, content),
+      canonical: false,
+      timeout_ms: 300000,
+      metadata: Json::object(Map([])),
+    },
+    stream,
+  })
+}
+
+///|
 pub fn attachment_json(value : @attachment.Attachment) -> Json {
   {
     "id": value.id,
@@ -595,6 +746,7 @@ pub(all) struct PlatformResponse {
 pub(all) enum PlatformAction {
   Response(PlatformResponse)
   Turn(String, TurnInput)
+  OpenAICompletion(OpenAICompletionInput)
   RetryTurn(String)
   ReplayEvents(String, Int)
   CancelTurn(String)
@@ -707,6 +859,23 @@ pub fn dispatch_platform(
     Err(error) => return Err(error)
   }
   match segments {
+    ["v1", "chat", "completions"] => {
+      if verb != "POST" {
+        return Err(@errors.method_not_allowed("POST"))
+      }
+      match pagination(query, []) {
+        Err(error) => return Err(error)
+        Ok(_) => ()
+      }
+      let input = match openai_completion_input(body) {
+        Ok(value) => value
+        Err(error) => return Err(error)
+      }
+      match find_agent(agents, input.model) {
+        Err(error) => return Err(error)
+        Ok(_) => Ok(Some(OpenAICompletion(input)))
+      }
+    }
     ["v1", "attachments"] => {
       if verb != "POST" {
         return Err(@errors.method_not_allowed("POST"))

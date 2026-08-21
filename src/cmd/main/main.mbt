@@ -575,6 +575,120 @@ async fn stream_turn_events(
 }
 
 ///|
+fn openai_sse(data : Json) -> String {
+  "data: " + data.stringify() + "\n\n"
+}
+
+///|
+async fn stream_openai_turn_events(
+  database : @sqlite3.Connection,
+  turn_id : String,
+  model : String,
+  connection : @asynchttp.ServerConnection,
+  id : String,
+) -> Unit {
+  let headers = platform_headers("text/event-stream; charset=utf-8", id)
+  headers.set("Connection", "keep-alive")
+  headers.set("X-Accel-Buffering", "no")
+  connection.send_response(200, "OK", extra_headers=headers)
+  connection.write_string(
+    openai_sse({
+      "id": "chatcmpl_" + turn_id,
+      "object": "chat.completion.chunk",
+      "created": @env.now().reinterpret_as_int64() / 1000,
+      "model": model,
+      "choices": [
+        {
+          "index": 0,
+          "delta": { "role": "assistant" },
+          "finish_reason": Json::null(),
+        },
+      ],
+    }),
+  )
+  connection.flush()
+  let mut cursor = 0
+  let mut open = true
+  let mut done = false
+  while open && !done {
+    let events = match
+      @conversation.list_events(database, turn_id, cursor, 1000) {
+      Ok(value) => value
+      Err(_) => []
+    }
+    if !events.is_empty() {
+      try {
+        for event in events {
+          cursor = event.sequence
+          if event.event == "message.delta" {
+            let delta = match event.data {
+              Object(data) =>
+                match data.get("delta") {
+                  Some(String(value)) => value
+                  _ => ""
+                }
+              _ => ""
+            }
+            if delta.length() > 0 {
+              connection.write_string(
+                openai_sse({
+                  "id": "chatcmpl_" + turn_id,
+                  "object": "chat.completion.chunk",
+                  "created": @env.now().reinterpret_as_int64() / 1000,
+                  "model": model,
+                  "choices": [
+                    {
+                      "index": 0,
+                      "delta": { "content": delta },
+                      "finish_reason": Json::null(),
+                    },
+                  ],
+                }),
+              )
+            }
+          }
+          if terminal_event(event.event) {
+            let reason = if event.event == "turn.completed" {
+              "stop"
+            } else {
+              "error"
+            }
+            connection.write_string(
+              openai_sse({
+                "id": "chatcmpl_" + turn_id,
+                "object": "chat.completion.chunk",
+                "created": @env.now().reinterpret_as_int64() / 1000,
+                "model": model,
+                "choices": [
+                  { "index": 0, "delta": {}, "finish_reason": reason },
+                ],
+              }),
+            )
+            done = true
+          }
+        }
+        connection.flush()
+      } catch {
+        _ => open = false
+      }
+    } else if @conversation.get_turn(database, turn_id) is Ok(turn) &&
+      turn.status != "active" {
+      done = true
+    } else {
+      @async.sleep(25)
+    }
+  }
+  if open {
+    connection.write_string("data: [DONE]\n\n") catch {
+      _ => ()
+    }
+    connection.end_response() catch {
+      _ => ()
+    }
+  }
+}
+
+///|
 async fn send_existing_turn(
   database : @sqlite3.Connection,
   turn : @conversation.Turn,
@@ -616,6 +730,7 @@ async fn run_http_turn(
   stream : Bool,
   idempotency_key : String,
   retry_source_turn_id : String,
+  openai_model : String?,
   connection : @asynchttp.ServerConnection,
   id : String,
   supervisor : @agent.TurnSupervisor,
@@ -871,7 +986,17 @@ async fn run_http_turn(
         ),
       )
       if stream {
-        stream_turn_events(database, ids.turn_id, 0, connection, id)
+        match openai_model {
+          Some(model) =>
+            stream_openai_turn_events(
+              database,
+              ids.turn_id,
+              model,
+              connection,
+              id,
+            )
+          None => stream_turn_events(database, ids.turn_id, 0, connection, id)
+        }
       } else {
         send_platform_error(connection, error, id)
       }
@@ -883,7 +1008,17 @@ async fn run_http_turn(
   if stream {
     @async.with_task_group() <| group => {
       group.spawn_bg(allow_failure=true) <| () => {
-        stream_turn_events(database, ids.turn_id, 0, connection, id)
+        match openai_model {
+          Some(model) =>
+            stream_openai_turn_events(
+              database,
+              ids.turn_id,
+              model,
+              connection,
+              id,
+            )
+          None => stream_turn_events(database, ids.turn_id, 0, connection, id)
+        }
       }
       ignore(task.wait() catch { _ => Err(@errors.turn_interrupted()) })
     }
@@ -907,32 +1042,57 @@ async fn run_http_turn(
           return
         }
       }
-      let body = @moonhttp.success({
-        "chat": @moonhttp.chat_json(current_chat, ""),
-        "turn": @moonhttp.turn_json(turn),
-        "message": {
-          "id": ids.assistant_message_id,
-          "chat_id": chat_id,
-          "turn_id": value.turn_id,
-          "role": "assistant",
-          "kind": "text",
-          "content": value.content,
-          "status": "completed",
-        },
-        "usage": {
-          "prompt_tokens": value.usage.prompt_tokens,
-          "completion_tokens": value.usage.completion_tokens,
-        },
-        "next": match value.next {
-          Some(data) => data
-          None => Json::null()
-        },
-        "side_effect_warning": if turn.retry_of_turn_id.length() > 0 {
-          Json::string("Retry may repeat Process side effects")
-        } else {
-          Json::null()
-        },
-      }).stringify()
+      let body = match openai_model {
+        Some(model) => {
+          let openai_response : Json = {
+            "id": "chatcmpl_" + value.turn_id,
+            "object": "chat.completion",
+            "created": turn.started_at / 1000,
+            "model": model,
+            "choices": [
+              {
+                "index": 0,
+                "message": { "role": "assistant", "content": value.content },
+                "finish_reason": "stop",
+              },
+            ],
+            "usage": {
+              "prompt_tokens": value.usage.prompt_tokens,
+              "completion_tokens": value.usage.completion_tokens,
+              "total_tokens": value.usage.prompt_tokens +
+              value.usage.completion_tokens,
+            },
+          }
+          openai_response.stringify()
+        }
+        None =>
+          @moonhttp.success({
+            "chat": @moonhttp.chat_json(current_chat, ""),
+            "turn": @moonhttp.turn_json(turn),
+            "message": {
+              "id": ids.assistant_message_id,
+              "chat_id": chat_id,
+              "turn_id": value.turn_id,
+              "role": "assistant",
+              "kind": "text",
+              "content": value.content,
+              "status": "completed",
+            },
+            "usage": {
+              "prompt_tokens": value.usage.prompt_tokens,
+              "completion_tokens": value.usage.completion_tokens,
+            },
+            "next": match value.next {
+              Some(data) => data
+              None => Json::null()
+            },
+            "side_effect_warning": if turn.retry_of_turn_id.length() > 0 {
+              Json::string("Retry may repeat Process side effects")
+            } else {
+              Json::null()
+            },
+          }).stringify()
+      }
       send_platform_response(
         connection,
         {
@@ -1166,6 +1326,52 @@ async fn serve_command(app_dir : String) -> Unit {
               }
           }
         }
+        Ok(Some(@moonhttp.OpenAICompletion(completion))) => {
+          let chat_id = "chatcmpl_" + request_id()
+          match
+            @conversation.create_chat(
+              database,
+              chat_id,
+              completion.model,
+              title_for_http(completion.input.preview),
+              @env.now().reinterpret_as_int64(),
+            ) {
+            Err(error) => {
+              ignore(@sqlite.close_result(database))
+              send_platform_error(connection, error, id)
+              return
+            }
+            Ok(_) => ()
+          }
+          let idempotency_key = match request.headers.get("idempotency-key") {
+            Some(value) =>
+              match @moonhttp.validate_idempotency_key(value) {
+                Err(error) => {
+                  ignore(@sqlite.close_result(database))
+                  send_platform_error(connection, error, id)
+                  return
+                }
+                Ok(_) => value
+              }
+            None => ""
+          }
+          run_http_turn(
+            application,
+            database,
+            chat_id,
+            completion.input,
+            attachments_root,
+            completion.stream,
+            idempotency_key,
+            "",
+            Some(completion.model),
+            connection,
+            id,
+            supervisor,
+            turn_group,
+          )
+          ignore(@sqlite.close_result(database))
+        }
         Ok(Some(@moonhttp.Turn(chat_id, content))) => {
           let stream = match request.headers.get("accept") {
             Some(value) => value.contains("text/event-stream")
@@ -1184,8 +1390,19 @@ async fn serve_command(app_dir : String) -> Unit {
             None => ""
           }
           run_http_turn(
-            application, database, chat_id, content, attachments_root, stream, idempotency_key,
-            "", connection, id, supervisor, turn_group,
+            application,
+            database,
+            chat_id,
+            content,
+            attachments_root,
+            stream,
+            idempotency_key,
+            "",
+            None,
+            connection,
+            id,
+            supervisor,
+            turn_group,
           )
           ignore(@sqlite.close_result(database))
         }
@@ -1233,6 +1450,7 @@ async fn serve_command(app_dir : String) -> Unit {
             stream,
             idempotency_key,
             source_turn_id,
+            None,
             connection,
             id,
             supervisor,
